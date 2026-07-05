@@ -1,36 +1,37 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# GL Cleaner
 
-## Getting Started
+Find and remove offsetting general-ledger entries — the automated version of "sort by absolute value and eyeball the matching +/− amounts", plus everything manual review can't do.
 
-First, run the development server:
+**Everything runs in your browser.** No server, no upload — GL data never leaves your machine. Deployable as a static site (Vercel free tier).
+
+## What it does
+
+1. **Upload** an `.xlsx`/`.csv` GL export.
+2. **Map columns** to the template (Amount required; Date, Doc No, Doc Type, Account, Description, Reference optional). Mappings are saved as reusable templates.
+3. **Configure** per account: nature (debit / credit / suspense-both-directions), max combination size (2–10), per-target time budget, optional date window, optional many-to-many deep search.
+4. **Review** proposed match groups. Nothing is ever removed automatically:
+   - exact 1:1 pairs, one-to-many combinations, many-to-many groups;
+   - confidence scoring (doc-number proximity, references, descriptions, doc types, dates);
+   - ambiguous amount clusters shown as clusters, alternatives labeled `alt x/y`;
+   - approving a group locks its entries — conflicting groups grey out;
+   - a set-packing **scenario optimizer** suggests the assignment that cleans the most rows;
+   - every target labeled matched / **proven unmatchable** (bitset oracle proof) / none within limits / budget exhausted.
+5. **Export** a new workbook: Cleaned GL, Removed Entries (group IDs + reasons), Summary (reconciliation). Hard invariants checked before export: every group sums to exactly 0, no entry in two groups, cleaned total equals original total.
+
+All amounts are integer cents internally — no floating-point anywhere in matching.
+
+## Engine
+
+- Pass 1: exact pairs via hash buckets (O(n)).
+- Pass 2: subset-sum per target — meet-in-the-middle (exhaustive, small sets) or memoized branch-and-bound with suffix-sum pruning; a GCD-reduced bitset reachability DP proves unmatchable targets.
+- Pass 3 (optional): many-to-many via synthetic targets.
+- Pass 2 shards across a Web Worker pool (one per CPU core).
+
+## Development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run dev        # dev server
+npx vitest run     # unit + e2e + real-data tests
+PERF=1 npx vitest run tests/perf.test.ts  # 5k-row perf check
+npm run build      # static production build
 ```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
