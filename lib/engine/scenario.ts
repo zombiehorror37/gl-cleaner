@@ -4,6 +4,8 @@ import { groupEntryIds, type MatchGroup } from './types';
 const weight = (g: MatchGroup) => groupEntryIds(g).length * 1000 + g.confidence;
 
 const EXACT_COMPONENT_LIMIT = 22;
+/** Node budget for the exact branch-and-bound; beyond it fall back to greedy. */
+const EXACT_NODE_BUDGET = 200_000;
 
 export interface ScenarioResult {
   /** Group ids included in the maximum-cleaning scenario. */
@@ -93,8 +95,14 @@ function exactPack(
   let best: string[] = [];
   const current: string[] = [];
   const blocked = new Map<string, number>();
+  let nodes = 0;
+  let exhausted = true;
 
   const dfs = (i: number, score: number) => {
+    if (++nodes > EXACT_NODE_BUDGET) {
+      exhausted = false;
+      return;
+    }
     if (score + suffix[i] <= bestScore) return;
     if (i === ordered.length) {
       if (score > bestScore) {
@@ -116,6 +124,11 @@ function exactPack(
     dfs(i + 1, score);
   };
   dfs(0, 0);
+  if (!exhausted) {
+    const greedy = greedyPack(comp, adj, byId);
+    const greedyScore = greedy.reduce((s, id) => s + weight(byId.get(id)!), 0);
+    if (greedyScore > bestScore) return greedy;
+  }
   return best;
 }
 

@@ -135,6 +135,29 @@ export default function ConfigureStep() {
                     />
                     <span>Deep search (many-to-many, slower)</span>
                   </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={cfg.globalNet}
+                      onChange={(e) => setConfig(account, { globalNet: e.target.checked })}
+                    />
+                    <span>
+                      Global netting sweep — clear{' '}
+                      <select
+                        value={cfg.netTargetSide}
+                        onChange={(e) =>
+                          setConfig(account, {
+                            netTargetSide: e.target.value as 'auto' | 'negative' | 'positive',
+                          })
+                        }
+                        className="rounded border border-black/15 bg-transparent px-1 py-0.5 dark:border-white/20 dark:bg-zinc-900"
+                      >
+                        <option value="auto">auto (by nature)</option>
+                        <option value="negative">all negatives</option>
+                        <option value="positive">all positives</option>
+                      </select>
+                    </span>
+                  </label>
                 </div>
               </div>
             </div>

@@ -9,6 +9,7 @@ import { allGroups, useStore } from '@/lib/store';
 export default function ExportStep() {
   const workbook = useStore((s) => s.workbook);
   const sheetIndex = useStore((s) => s.sheetIndex);
+  const mapping = useStore((s) => s.mapping);
   const entries = useStore((s) => s.entries);
   const runs = useStore((s) => s.runs);
   const approved = useStore((s) => s.approved);
@@ -36,6 +37,7 @@ export default function ExportStep() {
         headers: workbook.sheets[sheetIndex].headers,
         entries,
         approvedGroups,
+        amountCol: mapping.amount,
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -97,9 +99,10 @@ export default function ExportStep() {
         {error && <p className="text-sm text-red-500">{error}</p>}
       </div>
       <p className="text-xs opacity-50">
-        The workbook contains three sheets: Cleaned GL (surviving rows, original columns), Removed
-        Entries (with group ID, confidence and match reasons), and Summary (reconciliation). Your
-        original file is never modified.
+        The workbook contains four sheets: Detail (all rows annotated with Status / Group /
+        Match Type, open negatives highlighted red, live Excel check formulas), Cleaned GL
+        (surviving rows), Removed Entries (with group ID, confidence and match reasons), and
+        Summary (reconciliation). Your original file is never modified.
       </p>
     </div>
   );

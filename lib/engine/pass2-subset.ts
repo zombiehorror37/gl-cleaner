@@ -39,9 +39,10 @@ function dfs(ctx: SearchCtx, idx: number, remaining: number, depth: number): boo
     ctx.totalFound++;
     if (ctx.combos.length < ctx.maxKeep) {
       ctx.combos.push(ctx.chosen.map((i) => ctx.cands[i]));
-    } else {
-      ctx.truncated = true;
     }
+    // Enough alternatives kept → stop the whole search instead of exhausting
+    // the space just to count what we'd throw away.
+    if (ctx.combos.length >= ctx.maxKeep) ctx.truncated = true;
     return true;
   }
   const depthLeft = ctx.cap - depth;
@@ -50,7 +51,7 @@ function dfs(ctx: SearchCtx, idx: number, remaining: number, depth: number): boo
   if (++ctx.states % TIMEOUT_CHECK_INTERVAL === 0 && Date.now() > ctx.deadline) {
     ctx.timedOut = true;
   }
-  if (ctx.timedOut) return false;
+  if (ctx.timedOut || ctx.truncated) return false;
 
   const n = ctx.values.length;
   // Upper bound: taking the depthLeft largest remaining values still short.
@@ -82,7 +83,7 @@ function dfs(ctx: SearchCtx, idx: number, remaining: number, depth: number): boo
     const sub = dfs(ctx, j + 1, remaining - ctx.values[j], depth + 1);
     ctx.chosen.pop();
     if (!sub) complete = false;
-    if (ctx.timedOut) return false;
+    if (ctx.timedOut || ctx.truncated) return false;
   }
 
   if (complete && ctx.totalFound === before) {

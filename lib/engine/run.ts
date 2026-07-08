@@ -1,8 +1,49 @@
 import { findExactPairs } from './pass1-pairs';
 import { findCombos } from './pass2-subset';
 import { findDeepGroups } from './pass3-deep';
+import { solveGlobalNet } from './net-solver';
 import { buildScenario } from './scenario';
-import type { AccountConfig, EngineProgress, EngineResult, Entry, MatchGroup, TargetOutcome } from './types';
+import {
+  groupEntryIds,
+  type AccountConfig,
+  type EngineProgress,
+  type EngineResult,
+  type Entry,
+  type MatchGroup,
+  type NetReport,
+  type TargetOutcome,
+} from './types';
+
+export function netSide(config: AccountConfig): 'negative' | 'positive' {
+  if (config.netTargetSide !== 'auto') return config.netTargetSide;
+  // Debit-natured (and suspense/clearing) accounts: negatives are the side to
+  // clear; credit-natured: positives.
+  return config.nature === 'credit' ? 'positive' : 'negative';
+}
+
+/**
+ * Scenario + global net sweep, shared by sync and worker paths.
+ * Marks scenario groups, then solves the residual so that one approval of the
+ * suggestion clears every clearable target-side entry.
+ */
+export function finalizeGroups(
+  entries: Entry[],
+  groups: MatchGroup[],
+  config: AccountConfig,
+): NetReport | null {
+  const scenario = buildScenario(groups);
+  for (const g of groups) g.inScenario = scenario.chosen.has(g.id);
+
+  if (!config.globalNet) return null;
+  const used = new Set<number>();
+  for (const g of groups) {
+    if (g.inScenario) for (const id of groupEntryIds(g)) used.add(id);
+  }
+  const residual = entries.filter((e) => !used.has(e.id) && e.amount !== 0);
+  const { group, report } = solveGlobalNet(residual, netSide(config), config.account);
+  if (group) groups.push(group);
+  return report;
+}
 
 /**
  * Run all passes for one account. Pure and synchronous — the worker wraps it.
@@ -72,14 +113,14 @@ export function runAccount(
   }
 
   progress({ phase: 'scenario', targetsDone: totalTargets, targetsTotal: totalTargets, groupsFound: groups.length, statesExplored });
-  const scenario = buildScenario(groups);
-  for (const g of groups) g.inScenario = scenario.chosen.has(g.id);
+  const netReport = finalizeGroups(entries, groups, config);
 
   progress({ phase: 'done', targetsDone: totalTargets, targetsTotal: totalTargets, groupsFound: groups.length, statesExplored });
   return {
     groups,
     clusters: pass1.clusters,
     outcomes,
+    netReport,
     stats: {
       totalEntries: entries.length,
       positiveEntries: entries.filter((e) => e.amount > 0).length,

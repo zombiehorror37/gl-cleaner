@@ -15,8 +15,12 @@ Find and remove offsetting general-ledger entries — the automated version of "
    - ambiguous amount clusters shown as clusters, alternatives labeled `alt x/y`;
    - approving a group locks its entries — conflicting groups grey out;
    - a set-packing **scenario optimizer** suggests the assignment that cleans the most rows;
+   - a **global netting solver** sweeps the residual: one group clearing ALL remaining
+     unnatural-side entries against an exactly-summing offset subset (solved on the cheaper of
+     the direct/complement sides — GCD-reduced DP with reconstruction, branch-and-bound
+     fallback). One run + one click = zero open negatives whenever mathematically possible;
    - every target labeled matched / **proven unmatchable** (bitset oracle proof) / none within limits / budget exhausted.
-5. **Export** a new workbook: Cleaned GL, Removed Entries (group IDs + reasons), Summary (reconciliation). Hard invariants checked before export: every group sums to exactly 0, no entry in two groups, cleaned total equals original total.
+5. **Export** a new workbook: Detail (all rows annotated Status/Group/Type, open negatives red, live Excel check formulas), Cleaned GL, Removed Entries (group IDs + reasons), Summary (reconciliation). Hard invariants checked before export: every group sums to exactly 0, no entry in two groups, cleaned total equals original total.
 
 All amounts are integer cents internally — no floating-point anywhere in matching.
 
@@ -25,7 +29,10 @@ All amounts are integer cents internally — no floating-point anywhere in match
 - Pass 1: exact pairs via hash buckets (O(n)).
 - Pass 2: subset-sum per target — meet-in-the-middle (exhaustive, small sets) or memoized branch-and-bound with suffix-sum pruning; a GCD-reduced bitset reachability DP proves unmatchable targets.
 - Pass 3 (optional): many-to-many via synthetic targets.
-- Pass 2 shards across a Web Worker pool (one per CPU core).
+- Final pass: scenario set-packing + global netting solve on the residual.
+- The entire pipeline runs in a coordinator Web Worker; pass 2 shards across nested workers
+  (one per CPU core). The main thread only renders — review list is windowed with
+  `content-visibility` so thousands of groups stay smooth.
 
 ## Development
 

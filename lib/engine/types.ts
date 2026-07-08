@@ -32,6 +32,13 @@ export interface SearchConfig {
   deepSearch: boolean;
   /** Global budget for pass 3 in ms. */
   deepSearchBudgetMs: number;
+  /** Run the global netting solver on the scenario residual. */
+  globalNet: boolean;
+  /**
+   * Which sign the net solver clears. 'auto' = the unnatural side by account
+   * nature (negatives for debit and suspense — the clearing-account case).
+   */
+  netTargetSide: 'auto' | 'negative' | 'positive';
 }
 
 export interface AccountConfig extends SearchConfig {
@@ -42,13 +49,15 @@ export interface AccountConfig extends SearchConfig {
 export const DEFAULT_SEARCH: SearchConfig = {
   maxComboSize: 5,
   perTargetBudgetMs: 5000,
-  maxAlternatives: 20,
+  maxAlternatives: 5,
   dateWindowDays: null,
   deepSearch: false,
   deepSearchBudgetMs: 30000,
+  globalNet: true,
+  netTargetSide: 'auto',
 };
 
-export type GroupKind = 'pair' | 'combo' | 'deep';
+export type GroupKind = 'pair' | 'combo' | 'deep' | 'net';
 export type ConfidenceTier = 'high' | 'medium' | 'low';
 
 export interface MatchGroup {
@@ -96,7 +105,7 @@ export interface AmountCluster {
 }
 
 export interface EngineProgress {
-  phase: 'pass1' | 'pass2' | 'pass3' | 'scenario' | 'done';
+  phase: 'pass1' | 'pass2' | 'pass3' | 'scenario' | 'net' | 'done';
   account: string;
   targetsDone: number;
   targetsTotal: number;
@@ -104,10 +113,20 @@ export interface EngineProgress {
   statesExplored: number;
 }
 
+export interface NetReport {
+  side: 'negative' | 'positive';
+  /** Target-side entries cleared by the net group. */
+  clearedTargets: number;
+  /** Target-side entries no subset can clear (left open, with proof). */
+  strandedTargetIds: number[];
+  method: 'exact' | 'partial' | 'greedy' | 'none';
+}
+
 export interface EngineResult {
   groups: MatchGroup[];
   clusters: AmountCluster[];
   outcomes: TargetOutcome[];
+  netReport: NetReport | null;
   stats: {
     totalEntries: number;
     positiveEntries: number;

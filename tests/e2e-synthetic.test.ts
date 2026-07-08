@@ -78,9 +78,10 @@ describe('synthetic e2e', () => {
       headers: ['Date', 'Doc', 'Description', 'Account', 'Amount'],
       entries,
       approvedGroups,
+      amountCol: 4,
     });
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(Buffer.from(await blob.arrayBuffer()));
+    await wb.xlsx.load(await blob.arrayBuffer());
 
     const cleaned = wb.getWorksheet('Cleaned GL')!;
     const removed = wb.getWorksheet('Removed Entries')!;
