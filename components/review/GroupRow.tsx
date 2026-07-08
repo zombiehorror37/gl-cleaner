@@ -3,6 +3,7 @@ import { memo, useState } from 'react';
 import { fromCents } from '@/lib/engine/cents';
 import { groupEntryIds, type Entry, type MatchGroup } from '@/lib/engine/types';
 import ConfidenceBadge from './ConfidenceBadge';
+import AltCombos from './AltCombos';
 
 export type GroupDecision = 'pending' | 'approved' | 'rejected' | 'blocked';
 
@@ -24,18 +25,20 @@ function GroupRowInner({
   group,
   entryMap,
   decision,
-  altInfo,
+  siblings,
   actions,
 }: {
   group: MatchGroup;
   entryMap: Map<number, Entry>;
   decision: GroupDecision;
-  /** e.g. "alt 2/13" when the target has competing combos. */
-  altInfo: string | null;
+  /** All competing combos for this target (incl. this one); null/1 = no alternatives. */
+  siblings: MatchGroup[] | null;
   actions: GroupActions;
 }) {
   const [open, setOpen] = useState(false);
+  const [altOpen, setAltOpen] = useState(false);
   const isNet = group.kind === 'net';
+  const altCount = siblings ? siblings.length : 0;
 
   const rowTone =
     decision === 'approved'
@@ -73,8 +76,15 @@ function GroupRowInner({
             suggested
           </span>
         )}
-        {altInfo && <span className="text-xs opacity-50">{altInfo}</span>}
-        {group.clusterKey && (
+        {altCount > 1 && (
+          <button
+            onClick={() => setAltOpen((v) => !v)}
+            className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 hover:bg-amber-500/25 dark:text-amber-400"
+          >
+            ⇄ {altCount} clearing options {altOpen ? '▾' : '▸'}
+          </button>
+        )}
+        {group.clusterKey && altCount <= 1 && (
           <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-400">
             ambiguous cluster
           </span>
@@ -123,6 +133,10 @@ function GroupRowInner({
             </span>
           ))}
         </div>
+      )}
+
+      {altOpen && siblings && siblings.length > 1 && (
+        <AltCombos siblings={siblings} entryMap={entryMap} />
       )}
 
       {open && <MemberTable group={group} entryMap={entryMap} />}

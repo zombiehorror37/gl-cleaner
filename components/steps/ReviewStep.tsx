@@ -4,6 +4,7 @@ import { fromCents } from '@/lib/engine/cents';
 import {
   groupEntryIds,
   type ConfidenceTier,
+  type GroupKind,
   type MatchGroup,
 } from '@/lib/engine/types';
 import { allGroups, allOutcomes, isBlocked, lockedEntries, useStore } from '@/lib/store';
@@ -11,8 +12,16 @@ import GroupRow, { type GroupActions, type GroupDecision } from '@/components/re
 
 type TierFilter = 'all' | ConfidenceTier;
 type StatusFilter = 'all' | 'pending' | 'approved' | 'rejected';
+type KindFilter = 'all' | GroupKind;
 
 const PAGE = 100;
+const KIND_OPTIONS: { value: KindFilter; label: string }[] = [
+  { value: 'all', label: 'All types' },
+  { value: 'pair', label: '1:1 pairs' },
+  { value: 'combo', label: 'Combinations' },
+  { value: 'deep', label: 'Many-to-many' },
+  { value: 'net', label: 'Global netting' },
+];
 
 export default function ReviewStep() {
   const entries = useStore((s) => s.entries);
@@ -30,7 +39,9 @@ export default function ReviewStep() {
   const [viewAll, setViewAll] = useState(false);
   const [tierFilter, setTierFilter] = useState<TierFilter>('all');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  const [showAlternatives, setShowAlternatives] = useState(false);
+  const [kindFilter, setKindFilter] = useState<KindFilter>('all');
+  const [onlyAlts, setOnlyAlts] = useState(false);
+  const [search, setSearch] = useState('');
   const [renderCount, setRenderCount] = useState(PAGE);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
@@ -55,6 +66,25 @@ export default function ReviewStep() {
     }
     return m;
   }, [groups]);
+
+  // One lower-cased searchable string per group, built from its member entries.
+  const searchIndex = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const g of groups) {
+      const parts: string[] = [g.kind];
+      for (const id of groupEntryIds(g)) {
+        const e = entryMap.get(id);
+        if (!e) continue;
+        if (e.docNo) parts.push(e.docNo);
+        if (e.reference) parts.push(e.reference);
+        if (e.docType) parts.push(e.docType);
+        if (e.description) parts.push(e.description);
+        parts.push(fromCents(e.amount), fromCents(Math.abs(e.amount)), String(e.amount));
+      }
+      m.set(g.id, parts.join(' ').toLowerCase());
+    }
+    return m;
+  }, [groups, entryMap]);
 
   const decisions = useMemo(() => {
     const m = new Map<string, GroupDecision>();
@@ -85,32 +115,51 @@ export default function ReviewStep() {
     [groups],
   );
 
+  // One representative per alt cluster: the approved sibling if any, else the
+  // scenario-suggested one, else the highest-confidence one. Non-reps are
+  // reachable via the row's inline "clearing options" expander. `clusterShown`
+  // marks reps that belong in the suggested view (any sibling suggested, or the
+  // cluster has an approved pick) so choosing a non-suggested alternative never
+  // makes the whole cluster vanish.
+  const { isRepresentative, clusterShown } = useMemo(() => {
+    const rep = new Set<string>();
+    const shown = new Set<string>();
+    for (const g of sorted) {
+      if (!g.altKey || altCounts.get(g.altKey)!.length <= 1) {
+        rep.add(g.id);
+        if (g.inScenario) shown.add(g.id);
+        continue;
+      }
+      const sibs = altCounts.get(g.altKey)!;
+      const chosen =
+        sibs.find((s) => approved.has(s.id)) ??
+        sibs.find((s) => s.inScenario) ??
+        sibs.reduce((x, y) =>
+          y.confidence > x.confidence || (y.confidence === x.confidence && y.id < x.id) ? y : x,
+        );
+      rep.add(chosen.id);
+      if (sibs.some((s) => s.inScenario) || sibs.some((s) => approved.has(s.id))) shown.add(chosen.id);
+    }
+    return { isRepresentative: rep, clusterShown: shown };
+  }, [sorted, altCounts, approved]);
+
+  const needle = search.trim().toLowerCase();
   const visible = useMemo(() => {
     return sorted.filter((g) => {
-      if (!viewAll && !g.inScenario) return false;
+      if (!isRepresentative.has(g.id)) return false;
+      if (!viewAll && !clusterShown.has(g.id)) return false;
+      if (kindFilter !== 'all' && g.kind !== kindFilter) return false;
       if (tierFilter !== 'all' && g.tier !== tierFilter) return false;
       const d = decisions.get(g.id)!;
-      if (statusFilter === 'pending' && d !== 'pending') return false;
-      if (statusFilter === 'approved' && d !== 'approved') return false;
-      if (statusFilter === 'rejected' && d !== 'rejected') return false;
-      if (!showAlternatives && g.altKey && d === 'pending') {
-        const siblings = altCounts.get(g.altKey)!;
-        if (siblings.length > 1) {
-          const anyDecided = siblings.some((s) => approved.has(s.id) || rejected.has(s.id));
-          if (!anyDecided) {
-            const best = siblings.reduce((x, y) =>
-              y.confidence > x.confidence || (y.confidence === x.confidence && y.id < x.id) ? y : x,
-            );
-            if (best.id !== g.id) return false;
-          }
-        }
-      }
+      if (statusFilter !== 'all' && d !== statusFilter) return false;
+      if (onlyAlts && (!g.altKey || altCounts.get(g.altKey)!.length <= 1)) return false;
+      if (needle && !searchIndex.get(g.id)!.includes(needle)) return false;
       return true;
     });
-  }, [sorted, viewAll, tierFilter, statusFilter, showAlternatives, decisions, altCounts, approved, rejected]);
+  }, [sorted, viewAll, isRepresentative, clusterShown, kindFilter, tierFilter, statusFilter, onlyAlts, needle, decisions, altCounts, searchIndex]);
 
   // Windowed rendering: sentinel loads the next page as it scrolls into view.
-  useEffect(() => setRenderCount(PAGE), [viewAll, tierFilter, statusFilter, showAlternatives]);
+  useEffect(() => setRenderCount(PAGE), [viewAll, tierFilter, statusFilter, kindFilter, onlyAlts, needle]);
   useEffect(() => {
     const el = sentinelRef.current;
     if (!el) return;
@@ -150,7 +199,6 @@ export default function ReviewStep() {
     return { rows, sum, ids };
   }, [approvedGroups, entryMap]);
 
-  // Open target-side entries remaining if current approvals were exported.
   const openNegatives = useMemo(() => {
     let count = 0;
     let sum = 0;
@@ -162,6 +210,11 @@ export default function ReviewStep() {
     }
     return { count, sum };
   }, [entries, removed.ids]);
+
+  const clustersWithAlts = useMemo(
+    () => [...altCounts.values()].filter((s) => s.length > 1).length,
+    [altCounts],
+  );
 
   const netReports = runs.map((r) => r.result.netReport).filter((r) => r !== null);
   const stranded = netReports.flatMap((r) => r!.strandedTargetIds);
@@ -220,7 +273,7 @@ export default function ReviewStep() {
         </div>
       )}
 
-      {/* Bulk actions + filters */}
+      {/* Bulk actions */}
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <button
           onClick={() => bulkApprove(sorted.filter((g) => g.inScenario))}
@@ -240,71 +293,97 @@ export default function ReviewStep() {
         >
           Reset
         </button>
-        <span className="mx-2 opacity-30">|</span>
-        <label className="flex items-center gap-1.5">
+        <label className="ml-2 flex items-center gap-1.5">
           <input type="checkbox" checked={viewAll} onChange={(e) => setViewAll(e.target.checked)} />
           Explore all groups
         </label>
-        {viewAll && (
-          <>
-            <select
-              value={tierFilter}
-              onChange={(e) => setTierFilter(e.target.value as TierFilter)}
-              className="rounded-md border border-black/15 bg-transparent px-2 py-1 dark:border-white/20 dark:bg-zinc-900"
-            >
-              <option value="all">All confidence</option>
-              <option value="high">High only</option>
-              <option value="medium">Medium only</option>
-              <option value="low">Low only</option>
-            </select>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-              className="rounded-md border border-black/15 bg-transparent px-2 py-1 dark:border-white/20 dark:bg-zinc-900"
-            >
-              <option value="all">All statuses</option>
-              <option value="pending">Pending</option>
-              <option value="approved">Approved</option>
-              <option value="rejected">Rejected</option>
-            </select>
-            <label className="flex items-center gap-1.5">
-              <input
-                type="checkbox"
-                checked={showAlternatives}
-                onChange={(e) => setShowAlternatives(e.target.checked)}
-              />
-              Show all alternatives
-            </label>
-          </>
+      </div>
+
+      {/* Filters — always available */}
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-black/10 px-3 py-2 text-sm dark:border-white/10">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search doc no, description, amount…"
+          className="w-64 rounded-md border border-black/15 bg-transparent px-3 py-1 dark:border-white/20 dark:bg-zinc-900"
+        />
+        <select
+          value={kindFilter}
+          onChange={(e) => setKindFilter(e.target.value as KindFilter)}
+          className="rounded-md border border-black/15 bg-transparent px-2 py-1 dark:border-white/20 dark:bg-zinc-900"
+        >
+          {KIND_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={tierFilter}
+          onChange={(e) => setTierFilter(e.target.value as TierFilter)}
+          className="rounded-md border border-black/15 bg-transparent px-2 py-1 dark:border-white/20 dark:bg-zinc-900"
+        >
+          <option value="all">All confidence</option>
+          <option value="high">High only</option>
+          <option value="medium">Medium only</option>
+          <option value="low">Low only</option>
+        </select>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+          className="rounded-md border border-black/15 bg-transparent px-2 py-1 dark:border-white/20 dark:bg-zinc-900"
+        >
+          <option value="all">All statuses</option>
+          <option value="pending">Pending</option>
+          <option value="approved">Approved</option>
+          <option value="rejected">Rejected</option>
+        </select>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={onlyAlts} onChange={(e) => setOnlyAlts(e.target.checked)} />
+          Only groups with alternatives{clustersWithAlts > 0 && ` (${clustersWithAlts})`}
+        </label>
+        {(search || kindFilter !== 'all' || tierFilter !== 'all' || statusFilter !== 'all' || onlyAlts) && (
+          <button
+            onClick={() => {
+              setSearch('');
+              setKindFilter('all');
+              setTierFilter('all');
+              setStatusFilter('all');
+              setOnlyAlts(false);
+            }}
+            className="rounded-md bg-black/5 px-2 py-1 hover:bg-black/10 dark:bg-white/10"
+          >
+            Clear filters
+          </button>
         )}
         <span className="ml-auto opacity-60">
-          {visible.length} of {groups.length} groups {viewAll ? 'shown' : 'suggested'}
+          {visible.length} {viewAll ? 'shown' : 'suggested'} · {groups.length} total
         </span>
       </div>
 
       {/* Groups (windowed) */}
       <div className="space-y-2">
-        {visible.slice(0, renderCount).map((g) => {
-          const siblings = g.altKey ? altCounts.get(g.altKey)! : null;
-          const altInfo =
-            siblings && siblings.length > 1
-              ? `alt ${siblings.findIndex((s) => s.id === g.id) + 1}/${siblings.length} for this amount`
-              : null;
-          return (
-            <GroupRow
-              key={g.id}
-              group={g}
-              entryMap={entryMap}
-              decision={decisions.get(g.id)!}
-              altInfo={altInfo}
-              actions={actions}
-            />
-          );
-        })}
+        {visible.slice(0, renderCount).map((g) => (
+          // Key by cluster (altKey) so swapping the represented alternative
+          // keeps the same row mounted — the inline picker stays open.
+          <GroupRow
+            key={g.altKey ?? g.id}
+            group={g}
+            entryMap={entryMap}
+            decision={decisions.get(g.id)!}
+            siblings={g.altKey ? altCounts.get(g.altKey)! : null}
+            actions={actions}
+          />
+        ))}
         {renderCount < visible.length && (
           <div ref={sentinelRef} className="py-4 text-center text-sm opacity-50">
             Loading more… ({renderCount}/{visible.length})
           </div>
+        )}
+        {visible.length === 0 && (
+          <p className="rounded-xl border border-black/10 px-4 py-6 text-center text-sm opacity-60 dark:border-white/10">
+            No groups match the current filters.
+          </p>
         )}
       </div>
     </div>
