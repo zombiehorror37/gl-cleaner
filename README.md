@@ -12,9 +12,17 @@ Find and remove offsetting general-ledger entries — the automated version of "
 4. **Review** proposed match groups. Nothing is ever removed automatically:
    - exact 1:1 pairs, one-to-many combinations, many-to-many groups;
    - confidence scoring (doc-number proximity, references, descriptions, doc types, dates);
-   - ambiguous amount clusters shown as clusters, alternatives labeled `alt x/y`;
+   - **evidence gate**: only groups corroborated by at least one *documentary* signal (doc
+     numbers, reference, description, doc type — dates alone don't count) can be suggested
+     or bulk-approved; zero-evidence amount coincidences are quarantined in a collapsed
+     section (one representative per target, never the flood) for manual judgement only;
+   - ambiguous amount clusters shown as clusters, alternatives labeled `alt x/y`
+     (alternatives are ranked by evidence, not discovery order);
    - approving a group locks its entries — conflicting groups grey out;
-   - a set-packing **scenario optimizer** suggests the assignment that cleans the most rows;
+   - a set-packing **scenario optimizer** suggests the assignment that cleans the most rows,
+     driven in an **iterative match→pack→re-match loop**: after each packing the residual is
+     re-searched, so targets whose first proposals lost a conflict get their second-choice
+     evidenced combos — netting only ever sees what has no evidenced match left;
    - a **global netting solver** offered as an explicit **last resort**, kept out of the
      suggested cleanup: after every evidenced match is exhausted it sweeps the residual into one
      group clearing ALL remaining unnatural-side entries against an exactly-summing offset subset
@@ -29,10 +37,17 @@ All amounts are integer cents internally — no floating-point anywhere in match
 
 ## Engine
 
-- Pass 1: exact pairs via hash buckets (O(n)).
-- Pass 2: subset-sum per target — meet-in-the-middle (exhaustive, small sets) or memoized branch-and-bound with suffix-sum pruning; a GCD-reduced bitset reachability DP proves unmatchable targets.
-- Pass 3 (optional): many-to-many via synthetic targets.
-- Final pass: scenario set-packing + global netting solve on the residual.
+- Pass 1: exact pairs via hash buckets (O(n)). Only *decisively evidenced* pairs consume
+  their entries — a weak or unevidenced pair never blocks the combination search.
+- Pass 2: subset-sum per target — meet-in-the-middle (exhaustive, small sets) or memoized
+  branch-and-bound with suffix-sum pruning; a GCD-reduced bitset reachability DP proves
+  unmatchable targets. The search buffers more combos than it emits so the shortlist is
+  the best-evidenced alternatives, not the first found.
+- Pass 3: many-to-many via synthetic targets (on by default, budget-guarded); only
+  documented groups are emitted.
+- Passes 1–3 run in an iterative match→pack→re-match loop (set-packing over evidenced
+  groups each round, residual re-searched) until a fixpoint; the global netting solve
+  then handles only the true residual.
 - The entire pipeline runs in a coordinator Web Worker; pass 2 shards across nested workers
   (one per CPU core). The main thread only renders — review list is windowed with
   `content-visibility` so thousands of groups stay smooth.

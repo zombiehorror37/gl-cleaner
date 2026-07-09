@@ -22,6 +22,38 @@ const KIND_LABELS: Record<MatchGroup['kind'], string> = {
   net: 'global netting',
 };
 
+const fmtDate = (ms: number | null): string | null =>
+  ms === null ? null : new Date(ms).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' });
+
+/** Compact one-line context: docs, dates and description, so most groups can be judged without expanding. */
+function ContextLine({ group, entryMap }: { group: MatchGroup; entryMap: Map<number, Entry> }) {
+  const t = entryMap.get(group.targetIds[0]);
+  const offsets = group.offsetIds.map((id) => entryMap.get(id)).filter((e): e is Entry => !!e);
+  if (!t) return null;
+  const offsetDocs = offsets
+    .map((o) => o.docNo)
+    .filter((d): d is string => !!d)
+    .slice(0, 3);
+  const desc = (t.description ?? offsets.find((o) => o.description)?.description ?? '').trim();
+  return (
+    <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 text-xs opacity-70">
+      {t.docNo && (
+        <span className="font-mono">
+          {group.targetIds.length > 1 ? `${t.docNo} +${group.targetIds.length - 1}` : t.docNo}
+          {offsetDocs.length > 0 && (
+            <>
+              {' '}↔ {offsetDocs.join(', ')}
+              {group.offsetIds.length > offsetDocs.length && ` +${group.offsetIds.length - offsetDocs.length}`}
+            </>
+          )}
+        </span>
+      )}
+      {fmtDate(t.date) && <span>{fmtDate(t.date)}</span>}
+      {desc && <span className="max-w-[38ch] truncate">{desc}</span>}
+    </div>
+  );
+}
+
 function GroupRowInner({
   group,
   entryMap,
@@ -96,6 +128,14 @@ function GroupRowInner({
             suggested
           </span>
         )}
+        {!group.evidenced && !isNet && (
+          <span
+            className="rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-700 dark:text-red-400"
+            title="Sums to zero, but no document number, reference or description ties these entries together"
+          >
+            no evidence
+          </span>
+        )}
         {group.clusterKey && !hasAlts && (
           <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-400">
             ambiguous cluster
@@ -136,6 +176,10 @@ function GroupRowInner({
             </>
           )}
         </div>
+      </div>
+
+      <div className="px-4 pb-1 -mt-1">
+        <ContextLine group={group} entryMap={entryMap} />
       </div>
 
       {group.reasons.length > 0 && (

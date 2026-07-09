@@ -44,12 +44,27 @@ export function findDeepGroups(
       const res = searchCombosForTarget(synthetic, naturalResidual, deepConfig);
       statesExplored += res.statesExplored;
       const memberTargets = subset.map((i) => targets[i]);
-      for (const combo of res.combos) {
-        const { confidence, tier, reasons } = scoreGroup({
-          targets: memberTargets,
-          offsets: combo,
-          competingAlternatives: res.totalFound - 1,
-        });
+      // Evidence gate: many-to-many groups are speculative by construction, so
+      // only DOCUMENTED ones are worth surfacing at all — an unevidenced deep
+      // group is noise squared (the netting sweep covers that ground instead).
+      const ranked = res.combos
+        .map((combo) => ({
+          combo,
+          scored: scoreGroup({
+            targets: memberTargets,
+            offsets: combo,
+            competingAlternatives: Math.max(0, res.totalFound - 1),
+          }),
+        }))
+        .filter((e) => e.scored.evidenced)
+        .sort(
+          (a, b) =>
+            b.scored.confidence - a.scored.confidence ||
+            String(a.combo.map((e) => e.id)).localeCompare(String(b.combo.map((e) => e.id))),
+        )
+        .slice(0, deepConfig.maxAlternatives);
+      for (const { combo, scored } of ranked) {
+        const { confidence, tier, reasons, evidenced } = scored;
         groups.push({
           id: `${account}|deep|${seq++}`,
           account,
@@ -59,6 +74,7 @@ export function findDeepGroups(
           confidence,
           tier,
           reasons: [...reasons, `${memberTargets.length} reversals settled together`],
+          evidenced,
           clusterKey: null,
           inScenario: false,
           altKey: `${account}|deep-t|${memberTargets.map((e) => e.id).join(',')}`,

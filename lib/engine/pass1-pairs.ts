@@ -12,8 +12,12 @@ function bestExcluding(sortedDesc: number[], e: number): number {
 export interface Pass1Result {
   groups: MatchGroup[];
   clusters: AmountCluster[];
-  /** Entry ids consumed by proposed pairs (used to build pass-2 residual). */
-  pairedIds: Set<number>;
+  /**
+   * Entry ids consumed by HIGH-confidence evidenced pairs only. Weak or
+   * unevidenced pairs must never block the pass-2 combination search for the
+   * same entries — that is the packer's and the reviewer's call, not pass 1's.
+   */
+  consumedIds: Set<number>;
 }
 
 /**
@@ -37,7 +41,7 @@ export function findExactPairs(entries: Entry[], account: string): Pass1Result {
 
   const groups: MatchGroup[] = [];
   const clusters: AmountCluster[] = [];
-  const pairedIds = new Set<number>();
+  const consumedIds = new Set<number>();
   let seq = 0;
 
   const sortedKeys = [...buckets.keys()].sort((a, b) => b - a);
@@ -61,13 +65,13 @@ export function findExactPairs(entries: Entry[], account: string): Pass1Result {
     // (deterministic: ties broken by row order). Competition is folded in only
     // when the group is emitted, so a pairing that decisively out-scores its
     // rivals keeps its evidence instead of eating a flat ambiguity penalty.
-    const candidates: { p: Entry; n: Entry; ev: number; reasons: string[] }[] = [];
+    const candidates: { p: Entry; n: Entry; ev: number; reasons: string[]; documentary: number }[] = [];
     const evByN = new Map<number, number[]>(); // n.id -> evidences over all positives
     const evByP = new Map<number, number[]>(); // p.id -> evidences over all negatives
     for (const p of pos) {
       for (const n of neg) {
-        const { score, reasons } = scoreEvidence([n], [p]);
-        candidates.push({ p, n, ev: score, reasons });
+        const { score, reasons, documentary } = scoreEvidence([n], [p]);
+        candidates.push({ p, n, ev: score, reasons, documentary });
         (evByN.get(n.id) ?? evByN.set(n.id, []).get(n.id)!).push(score);
         (evByP.get(p.id) ?? evByP.set(p.id, []).get(p.id)!).push(score);
       }
@@ -99,6 +103,7 @@ export function findExactPairs(entries: Entry[], account: string): Pass1Result {
       if (crowd > 0) {
         reasons.push(margin >= 12 ? 'clearest of the alternatives' : `${crowd} competing entr${crowd === 1 ? 'y' : 'ies'} at this amount — review`);
       }
+      const tier = tierFor(confidence);
       groups.push({
         id: `${account}|pair|${seq++}`,
         account,
@@ -106,16 +111,21 @@ export function findExactPairs(entries: Entry[], account: string): Pass1Result {
         targetIds: [c.n.id],
         offsetIds: [c.p.id],
         confidence,
-        tier: tierFor(confidence),
+        tier,
         reasons,
+        evidenced: c.documentary > 0,
         clusterKey,
         inScenario: false,
         altKey: null,
       });
-      pairedIds.add(c.p.id);
-      pairedIds.add(c.n.id);
+      // Only a decisively evidenced pair takes its entries out of the deeper
+      // search; anything weaker still competes with combinations downstream.
+      if (tier === 'high' && c.documentary > 0) {
+        consumedIds.add(c.p.id);
+        consumedIds.add(c.n.id);
+      }
     }
   }
 
-  return { groups, clusters, pairedIds };
+  return { groups, clusters, consumedIds };
 }

@@ -2,6 +2,7 @@
 // the reference script's output (Book1_netted.xlsx) whose Detail sheet holds
 // all original rows + 3 annotation columns we strip.
 import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import * as XLSX from 'xlsx';
 import { buildEntries } from '../lib/parse';
@@ -10,6 +11,7 @@ import { runAccount } from '../lib/engine/run';
 import { groupEntryIds, DEFAULT_SEARCH } from '../lib/engine/types';
 
 const CANDIDATES = [
+  fileURLToPath(new URL('../sample/Book1 (2).xlsx', import.meta.url)),
   'C:\\Users\\zombi\\Desktop\\Book1.xlsx',
   'C:\\Users\\zombi\\Desktop\\Book1 (2).xlsx',
   'C:\\Users\\zombi\\Downloads\\Book1_netted.xlsx',
@@ -58,10 +60,18 @@ if (!src) {
       nature: 'suspense',
       maxComboSize: 3, // keep the CI-style run quick; UI default is 5
       perTargetBudgetMs: 3000,
+      deepSearchBudgetMs: 3000, // bounded many-to-many for CI; UI default is 30s
     });
 
-    it('finds the 50 exact pairs', () => {
-      expect(result.groups.filter((g) => g.kind === 'pair')).toHaveLength(50);
+    it('finds at least the 50 first-round exact pairs', () => {
+      // Later re-match rounds may propose additional pairings over the residual.
+      expect(result.groups.filter((g) => g.kind === 'pair').length).toBeGreaterThanOrEqual(50);
+    });
+
+    it('every suggested group carries documentary evidence', () => {
+      for (const g of result.groups.filter((g) => g.inScenario)) {
+        expect(g.evidenced).toBe(true);
+      }
     });
 
     it('reports the ambiguous 500,000.00 cluster as 10 pos vs 2 neg', () => {

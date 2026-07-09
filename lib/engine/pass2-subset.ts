@@ -6,6 +6,13 @@ const DAY_MS = 86_400_000;
 const TIMEOUT_CHECK_INTERVAL = 4096;
 /** Candidate-set size at or below which meet-in-the-middle enumerates exhaustively. */
 const MITM_MAX_N = 30;
+/**
+ * The search keeps more combos than the UI shows so the emitted alternatives
+ * can be the best-EVIDENCED ones, not merely the first found in DFS order —
+ * otherwise an amount coincidence discovered early can crowd out the real,
+ * documented reversal.
+ */
+const KEEP_BUFFER = 24;
 
 export interface ComboSearchResult {
   /** Each combo is a list of candidate entries summing exactly to the target. */
@@ -193,9 +200,10 @@ export function searchCombosForTarget(
   const values = sorted.map((c) => Math.abs(c.amount));
 
   const cap = Math.max(2, Math.min(10, config.maxComboSize));
+  const maxKeep = Math.max(config.maxAlternatives, KEEP_BUFFER);
 
   if (sorted.length <= MITM_MAX_N) {
-    return mitm(sorted, values, targetAbs, cap, config.maxAlternatives);
+    return mitm(sorted, values, targetAbs, cap, maxKeep);
   }
 
   const prefix = new Array<number>(values.length + 1);
@@ -207,7 +215,7 @@ export function searchCombosForTarget(
     cands: sorted,
     prefix,
     cap,
-    maxKeep: config.maxAlternatives,
+    maxKeep,
     deadline: Date.now() + config.perTargetBudgetMs,
     states: 0,
     truncated: false,
@@ -260,11 +268,13 @@ export function findCombos(
     const res = searchCombosForTarget(target, naturalPool, config);
     statesExplored += res.statesExplored;
 
-    // Score raw evidence for every alternative, then rank. Competition is folded
-    // in afterwards using the field's decisiveness: the leader keeps its score
+    // Score raw evidence for every kept alternative, rank by evidence, and emit
+    // only the best few — the search buffers more combos than the UI shows so
+    // the shortlist is evidence-ranked, not DFS-order. Competition is folded in
+    // afterwards using the field's decisiveness: the leader keeps its score
     // when it clearly beats the runner-up, while near-ties all get marked down
     // so the reviewer sees "these are genuinely ambiguous — pick one".
-    const evald = res.combos
+    const ranked = res.combos
       .map((combo) => ({ combo, ...scoreEvidence([target], combo) }))
       .sort(
         (a, b) =>
@@ -272,8 +282,15 @@ export function findCombos(
           a.combo.length - b.combo.length ||
           String(a.combo.map((e) => e.id)).localeCompare(String(b.combo.map((e) => e.id))),
       );
+    // Evidence gate: unevidenced combos are subset-sum coincidences — endless
+    // supply, zero review value. Emit evidenced alternatives only; when a
+    // target has none, keep the single best coincidence as a representative so
+    // the reviewer still sees the target COULD clear (quarantined in the UI).
+    const evidencedAlts = ranked.filter((e) => e.documentary > 0).slice(0, config.maxAlternatives);
+    const evald = evidencedAlts.length > 0 ? evidencedAlts : ranked.slice(0, 1);
 
-    const crowd = evald.length - 1;
+    // Crowd = every other combo that clears this amount, kept or not.
+    const crowd = Math.max(0, res.totalFound - 1);
     const bestEvidence = evald[0]?.score ?? 0;
     const runnerUp = evald[1]?.score ?? 0;
     const scored = evald.map((e, i) => {
@@ -285,7 +302,13 @@ export function findCombos(
         else if (i === 0) reasons.push(`${crowd} close alternative${crowd > 1 ? 's' : ''} — review`);
         else reasons.push(`alternative — ${crowd} other${crowd > 1 ? 's' : ''} clear this amount`);
       }
-      return { combo: e.combo, confidence, tier: tierFor(confidence), reasons };
+      return {
+        combo: e.combo,
+        confidence,
+        tier: tierFor(confidence),
+        reasons,
+        evidenced: e.documentary > 0,
+      };
     });
 
     const altKey = `${account}|t|${target.id}`;
@@ -299,6 +322,7 @@ export function findCombos(
         confidence: s.confidence,
         tier: s.tier,
         reasons: s.reasons,
+        evidenced: s.evidenced,
         clusterKey: null,
         inScenario: false,
         altKey,

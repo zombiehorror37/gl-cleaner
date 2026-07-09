@@ -53,7 +53,9 @@ export const DEFAULT_SEARCH: SearchConfig = {
   perTargetBudgetMs: 5000,
   maxAlternatives: 5,
   dateWindowDays: null,
-  deepSearch: false,
+  // Many-to-many is part of the standard pipeline: every combination class is
+  // tried (budget-guarded) before anything falls through to global netting.
+  deepSearch: true,
   deepSearchBudgetMs: 30000,
   globalNet: true,
   netTargetSide: 'auto',
@@ -74,6 +76,13 @@ export interface MatchGroup {
   confidence: number;
   tier: ConfidenceTier;
   reasons: string[];
+  /**
+   * True when at least one *documentary* signal corroborates the group (doc
+   * numbers, reference, description, doc-type pattern). Amount+date-only
+   * coincidences are NOT evidenced: they are excluded from the suggested
+   * scenario and quarantined in the review UI.
+   */
+  evidenced: boolean;
   /** Groups sharing a clusterKey compete for the same absolute amount (pass 1 ambiguity). */
   clusterKey: string | null;
   /** True if part of the suggested maximum-cleaning scenario. */
@@ -113,6 +122,8 @@ export interface EngineProgress {
   targetsTotal: number;
   groupsFound: number;
   statesExplored: number;
+  /** Match→pack→re-match iteration currently running (1-based). */
+  round?: number;
 }
 
 export interface NetReport {

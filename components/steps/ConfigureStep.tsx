@@ -133,7 +133,7 @@ export default function ConfigureStep() {
                       checked={cfg.deepSearch}
                       onChange={(e) => setConfig(account, { deepSearch: e.target.checked })}
                     />
-                    <span>Deep search (many-to-many, slower)</span>
+                    <span>Many-to-many search (budget-guarded, runs before netting)</span>
                   </label>
                   <label className="flex items-center gap-2">
                     <input
@@ -176,6 +176,7 @@ export default function ConfigureStep() {
         {running && progress && (
           <div className="text-sm opacity-80">
             <span className="font-medium capitalize">{progress.phase}</span>
+            {progress.round !== undefined && <span className="opacity-70"> · round {progress.round}</span>}
             {progress.phase === 'pass2' && (
               <>
                 {' '}

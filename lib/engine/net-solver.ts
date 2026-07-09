@@ -283,6 +283,8 @@ function buildGroup(
       confidence,
       tier: tierFor(confidence),
       reasons,
+      // A net sweep is a balancing action by definition, never documentary proof.
+      evidenced: false,
       clusterKey: null,
       // Never part of the suggested (evidenced) scenario — netting is a deliberate,
       // separately-approved last resort surfaced only after every match is exhausted.

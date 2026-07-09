@@ -37,6 +37,8 @@ export default function ReviewStep() {
   const setStep = useStore((s) => s.setStep);
 
   const [viewAll, setViewAll] = useState(false);
+  const [showUnevidenced, setShowUnevidenced] = useState(false);
+  const [unevidencedCount, setUnevidencedCount] = useState(PAGE);
   const [tierFilter, setTierFilter] = useState<TierFilter>('all');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
@@ -108,16 +110,26 @@ export default function ReviewStep() {
     () => groups.filter((g) => g.kind === 'net').sort((a, b) => a.id.localeCompare(b.id)),
     [groups],
   );
+  // The main list is EVIDENCED matches only. Zero-evidence amount coincidences
+  // are quarantined in their own collapsed section — they are never suggested
+  // and never bulk-approved.
   const sorted = useMemo(
     () =>
       groups
-        .filter((g) => g.kind !== 'net')
+        .filter((g) => g.kind !== 'net' && g.evidenced)
         .sort(
           (a, b) =>
             Number(b.inScenario) - Number(a.inScenario) ||
             b.confidence - a.confidence ||
             a.id.localeCompare(b.id),
         ),
+    [groups],
+  );
+  const unevidenced = useMemo(
+    () =>
+      groups
+        .filter((g) => g.kind !== 'net' && !g.evidenced)
+        .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id)),
     [groups],
   );
 
@@ -229,6 +241,13 @@ export default function ReviewStep() {
     [altCounts],
   );
 
+  // Coverage of the one-click suggestion (evidenced scenario groups).
+  const suggestedCoverage = useMemo(() => {
+    const ids = new Set<number>();
+    for (const g of sorted) if (g.inScenario) for (const id of groupEntryIds(g)) ids.add(id);
+    return ids.size;
+  }, [sorted]);
+
   const netReports = runs.map((r) => r.result.netReport).filter((r) => r !== null);
   const stranded = netReports.flatMap((r) => r!.strandedTargetIds);
 
@@ -246,29 +265,50 @@ export default function ReviewStep() {
   return (
     <div className="space-y-4">
       {/* Summary bar — live reconciliation while you decide. */}
-      <div className="sticky top-[104px] z-10 flex flex-wrap items-center gap-2 rounded-xl border border-black/10 bg-white/90 p-2 backdrop-blur dark:border-white/10 dark:bg-zinc-950/90">
-        <Stat label="Approved" value={approvedGroups.length} />
-        <Stat label="Rows to remove" value={removed.rows} />
-        <Stat
-          label="Removed sum"
-          value={fromCents(removed.sum)}
-          mono
-          tone={removed.sum === 0 ? 'good' : 'bad'}
-          hint={removed.sum === 0 ? 'balances ✓' : 'must be 0'}
-        />
-        <Stat
-          label="Negatives left open"
-          value={`${openNegatives.count}`}
-          tone={openNegatives.count === 0 ? 'good' : 'warn'}
-          hint={fromCents(openNegatives.sum)}
-        />
-        <button
-          onClick={() => setStep('export')}
-          disabled={approvedGroups.length === 0 || removed.sum !== 0}
-          className="ml-auto rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-40"
+      <div className="sticky top-[104px] z-10 space-y-1.5 rounded-xl border border-black/10 bg-white/90 p-2 backdrop-blur dark:border-white/10 dark:bg-zinc-950/90">
+        <div className="flex flex-wrap items-center gap-2">
+          <Stat label="Approved" value={approvedGroups.length} />
+          <Stat
+            label="Rows to remove"
+            value={removed.rows}
+            hint={entries.length ? `of ${entries.length}` : undefined}
+          />
+          <Stat
+            label="Removed sum"
+            value={fromCents(removed.sum)}
+            mono
+            tone={removed.sum === 0 ? 'good' : 'bad'}
+            hint={removed.sum === 0 ? 'balances ✓' : 'must be 0'}
+          />
+          <Stat
+            label="Negatives left open"
+            value={`${openNegatives.count}`}
+            tone={openNegatives.count === 0 ? 'good' : 'warn'}
+            hint={fromCents(openNegatives.sum)}
+          />
+          <Stat label="Evidenced coverage" value={suggestedCoverage} hint="rows suggested" />
+          <button
+            onClick={() => setStep('export')}
+            disabled={approvedGroups.length === 0 || removed.sum !== 0}
+            className="ml-auto rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-40"
+          >
+            Continue → Export
+          </button>
+        </div>
+        {/* Cleared-rows meter: approved (solid) vs suggested-but-pending (soft). */}
+        <div
+          className="relative h-1.5 overflow-hidden rounded-full bg-black/10 dark:bg-white/10"
+          title={`${removed.rows} rows approved for removal · ${suggestedCoverage} rows in the evidenced suggestion`}
         >
-          Continue → Export
-        </button>
+          <span
+            className="absolute inset-y-0 left-0 rounded-full bg-indigo-300 dark:bg-indigo-800"
+            style={{ width: `${entries.length ? (suggestedCoverage / entries.length) * 100 : 0}%` }}
+          />
+          <span
+            className="absolute inset-y-0 left-0 rounded-full bg-emerald-500"
+            style={{ width: `${entries.length ? (removed.rows / entries.length) * 100 : 0}%` }}
+          />
+        </div>
       </div>
 
       {stranded.length > 0 && (
@@ -305,7 +345,7 @@ export default function ReviewStep() {
               viewAll ? 'bg-indigo-600 text-white' : 'opacity-70 hover:opacity-100'
             }`}
           >
-            Explore all groups
+            All evidenced groups
           </button>
         </div>
         <div className="mx-1 h-6 w-px bg-black/10 dark:bg-white/10" />
@@ -395,7 +435,8 @@ export default function ReviewStep() {
           </button>
         )}
         <span className="ml-auto opacity-60">
-          {visible.length} {viewAll ? 'shown' : 'suggested'} · {groups.length} total
+          {visible.length} {viewAll ? 'shown' : 'suggested'} · {sorted.length} evidenced ·{' '}
+          {unevidenced.length} without evidence
         </span>
       </div>
 
@@ -424,6 +465,53 @@ export default function ReviewStep() {
           </p>
         )}
       </div>
+
+      {/* Quarantine — zero-evidence amount coincidences, never suggested or bulk-approved. */}
+      {unevidenced.length > 0 && (
+        <div className="rounded-xl border border-black/10 dark:border-white/10">
+          <button
+            onClick={() => setShowUnevidenced((v) => !v)}
+            className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm"
+          >
+            <span className="opacity-50">{showUnevidenced ? '▾' : '▸'}</span>
+            <span className="font-semibold">
+              No documentary evidence — {unevidenced.length} amount coincidence
+              {unevidenced.length === 1 ? '' : 's'}
+            </span>
+            <span className="ml-auto text-xs opacity-60">
+              excluded from suggestions & bulk approval — approve individually only if you
+              recognise them
+            </span>
+          </button>
+          {showUnevidenced && (
+            <div className="space-y-2 border-t border-black/5 p-3 dark:border-white/5">
+              <p className="text-xs opacity-70">
+                These groups sum to exactly zero but share no document number, reference or
+                description. In a ledger this size, exact sums arise by coincidence — treat
+                each as unproven unless you know the transaction.
+              </p>
+              {unevidenced.slice(0, unevidencedCount).map((g) => (
+                <GroupRow
+                  key={g.id}
+                  group={g}
+                  entryMap={entryMap}
+                  decision={decisions.get(g.id)!}
+                  siblings={g.altKey ? altCounts.get(g.altKey)! : null}
+                  actions={actions}
+                />
+              ))}
+              {unevidencedCount < unevidenced.length && (
+                <button
+                  onClick={() => setUnevidencedCount((c) => c + PAGE)}
+                  className="w-full rounded-lg bg-black/5 py-2 text-center text-sm hover:bg-black/10 dark:bg-white/10"
+                >
+                  Show more ({unevidencedCount}/{unevidenced.length})
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Last resort — global netting, kept out of the suggested cleanup. */}
       {netGroups.length > 0 && (

@@ -41,6 +41,8 @@ export interface ScoreResult {
   confidence: number;
   tier: ConfidenceTier;
   reasons: string[];
+  /** True when at least one documentary signal corroborates the group. */
+  evidenced: boolean;
 }
 
 export interface Evidence {
@@ -49,6 +51,13 @@ export interface Evidence {
   reasons: string[];
   /** How many independent corroborating signals fired (excludes the amount match itself). */
   signals: number;
+  /**
+   * Documentary signals only: doc-number proximity, shared reference,
+   * description cite/similarity, reversal keyword, doc-type pattern.
+   * Date proximity is corroborating but NOT documentary — a group needs
+   * documentary > 0 to count as an evidenced match.
+   */
+  documentary: number;
 }
 
 const numericDoc = (e: Entry): number | null => {
@@ -82,6 +91,7 @@ export function scoreEvidence(targets: Entry[], offsets: Entry[]): Evidence {
   const all = [...targets, ...offsets];
   let score = 8; // exact offset exists — necessary but weak on its own
   let signals = 0;
+  let documentary = 0;
 
   // Document-number proximity: a reversal is very often booked as an adjacent
   // voucher, so a tiny numeric distance is the single strongest signal.
@@ -101,14 +111,17 @@ export function scoreEvidence(targets: Entry[], offsets: Entry[]): Evidence {
     // 1:1 pair reaches the high tier on this signal alone (8 + 48 + 14 = 70).
     score += 48;
     signals++;
+    documentary++;
     reasons.push('identical doc numbers');
   } else if (minDocDist <= 3) {
     score += 34;
     signals++;
+    documentary++;
     reasons.push(`doc numbers within ${minDocDist}`);
   } else if (minDocDist <= 10) {
     score += 18;
     signals++;
+    documentary++;
     reasons.push(`doc numbers within ${minDocDist}`);
   }
 
@@ -117,6 +130,7 @@ export function scoreEvidence(targets: Entry[], offsets: Entry[]): Evidence {
   if (refs.length === all.length && new Set(refs.map((r) => r.toLowerCase())).size === 1) {
     score += 28;
     signals++;
+    documentary++;
     reasons.push('same reference');
   }
 
@@ -132,6 +146,7 @@ export function scoreEvidence(targets: Entry[], offsets: Entry[]): Evidence {
   if (crossMatch) {
     score += 26;
     signals++;
+    documentary++;
     reasons.push('description cites counterpart document');
   }
 
@@ -140,6 +155,7 @@ export function scoreEvidence(targets: Entry[], offsets: Entry[]): Evidence {
   if (descs.length === all.length && new Set(descs.map((d) => d.toLowerCase())).size === 1) {
     score += 22;
     signals++;
+    documentary++;
     reasons.push('identical descriptions');
   } else {
     const [a, ...rest] = descs;
@@ -155,6 +171,7 @@ export function scoreEvidence(targets: Entry[], offsets: Entry[]): Evidence {
       if (shared) {
         score += 11;
         signals++;
+        documentary++;
         reasons.push('similar descriptions');
       }
     }
@@ -169,6 +186,7 @@ export function scoreEvidence(targets: Entry[], offsets: Entry[]): Evidence {
   ) {
     score += 10;
     signals++;
+    documentary++;
     reasons.push('reversal keyword in description');
   }
 
@@ -178,6 +196,7 @@ export function scoreEvidence(targets: Entry[], offsets: Entry[]): Evidence {
   if (tTypes.has('JE') && oTypes.size > 0 && !oTypes.has('JE')) {
     score += 8;
     signals++;
+    documentary++;
     reasons.push('journal entry offsetting source documents');
   }
 
@@ -218,14 +237,19 @@ export function scoreEvidence(targets: Entry[], offsets: Entry[]): Evidence {
     reasons.push(`${offsets.length}-entry combination`);
   }
 
-  // Completeness guard: with zero corroborating signals this is an amount-only
-  // coincidence. Cap it below the medium tier no matter how the base adds up.
-  if (signals === 0) {
+  // Completeness guard: with zero *documentary* signals this is an amount (or
+  // amount+date) coincidence, not an evidenced match. Cap it below the medium
+  // tier no matter how the base adds up — dates alone don't prove a reversal.
+  if (documentary === 0) {
     score = Math.min(score, 30);
-    reasons.push('amount-only match — no supporting detail');
+    reasons.push(
+      signals > 0
+        ? 'no documentary evidence — amount/date coincidence'
+        : 'amount-only match — no supporting detail',
+    );
   }
 
-  return { score: clamp(score), reasons, signals };
+  return { score: clamp(score), reasons, signals, documentary };
 }
 
 /**
@@ -254,5 +278,11 @@ export function contest(evidence: number, crowd: number, marginOverRival: number
 export function scoreGroup({ targets, offsets, competingAlternatives }: ScoreInput): ScoreResult {
   const ev = scoreEvidence(targets, offsets);
   const confidence = contest(ev.score, competingAlternatives, 0);
-  return { evidence: ev.score, confidence, tier: tierFor(confidence), reasons: ev.reasons };
+  return {
+    evidence: ev.score,
+    confidence,
+    tier: tierFor(confidence),
+    reasons: ev.reasons,
+    evidenced: ev.documentary > 0,
+  };
 }
