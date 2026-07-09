@@ -82,34 +82,52 @@ describe('solveGlobalNet', () => {
 });
 
 describe('pipeline with global net', () => {
-  it('one run leaves zero clearable negatives open', () => {
+  // -90 can only be cleared by 30+30+30 (three offsets) — beyond the maxComboSize=2
+  // cap, so no evidenced combo covers it and it survives into the residual for the
+  // unbounded net sweep. That makes the net genuinely necessary here.
+  const messyEntries = () => {
     nextId = 0;
-    const entries = [
-      // pair
-      entry(500),
+    return [
+      entry(500), // pair …
       entry(-500),
-      // combo target
-      entry(-1000),
-      entry(700),
-      entry(300),
-      // messy rest: negatives clearable only via the global sweep
-      entry(-850),
-      entry(-150),
-      entry(600),
-      entry(250),
-      entry(120),
+      entry(-90), // needs 30+30+30 → 3 offsets, above the cap
       entry(30),
-      entry(9999), // surplus positive that stays open
+      entry(30),
+      entry(30),
+      entry(7777), // surplus positive that stays open
     ];
-    const res = runAccount(entries, { ...DEFAULT_SEARCH, account: 'A', nature: 'debit' });
+  };
+  const cfg = { ...DEFAULT_SEARCH, account: 'A', nature: 'debit' as const, maxComboSize: 2 };
+
+  it('the net sweep is a low-confidence last resort, never in the suggested scenario', () => {
+    const res = runAccount(messyEntries(), cfg);
+    const net = res.groups.find((g) => g.kind === 'net');
+    expect(net).toBeDefined();
+    // Netting is a balancing action, not evidence: kept out of the auto-suggested
+    // cleanup and honestly scored below the medium tier no matter how much it clears.
+    expect(net!.inScenario).toBe(false);
+    expect(net!.tier).toBe('low');
+    expect(res.groups.filter((g) => g.inScenario).some((g) => g.kind === 'net')).toBe(false);
+  });
+
+  it('suggested cleanup + the net sweep together leave zero clearable negatives open', () => {
+    const entries = messyEntries();
+    const res = runAccount(entries, cfg);
+    // Evidenced scenario alone does NOT clear the -90 — that is the honest state now;
+    // the residual is cleared only by explicitly running the net.
     const suggested = res.groups.filter((g) => g.inScenario);
-    const used = new Set(suggested.flatMap((g) => groupEntryIds(g)));
+    const suggestedUsed = new Set(suggested.flatMap((g) => groupEntryIds(g)));
+    expect(entries.some((e) => e.amount < 0 && !suggestedUsed.has(e.id))).toBe(true);
+
+    const cleared = [...suggested, ...res.groups.filter((g) => g.kind === 'net')];
+    const used = new Set(cleared.flatMap((g) => groupEntryIds(g)));
+    // scenario groups and the net sweep are mutually disjoint by construction.
+    expect(used.size).toBe(cleared.reduce((s, g) => s + groupEntryIds(g).length, 0));
     const openNegs = entries.filter((e) => e.amount < 0 && !used.has(e.id));
     expect(openNegs).toHaveLength(0);
     expect(res.netReport).not.toBeNull();
-    // every suggested group zero-sum
     const map = new Map(entries.map((e) => [e.id, e]));
-    for (const g of suggested) {
+    for (const g of cleared) {
       expect(groupEntryIds(g).reduce((s, id) => s + map.get(id)!.amount, 0)).toBe(0);
     }
   });

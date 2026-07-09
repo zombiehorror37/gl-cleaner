@@ -15,12 +15,12 @@ type StatusFilter = 'all' | 'pending' | 'approved' | 'rejected';
 type KindFilter = 'all' | GroupKind;
 
 const PAGE = 100;
+// Global netting is surfaced in its own last-resort panel, not this list.
 const KIND_OPTIONS: { value: KindFilter; label: string }[] = [
   { value: 'all', label: 'All types' },
   { value: 'pair', label: '1:1 pairs' },
   { value: 'combo', label: 'Combinations' },
   { value: 'deep', label: 'Many-to-many' },
-  { value: 'net', label: 'Global netting' },
 ];
 
 export default function ReviewStep() {
@@ -102,15 +102,22 @@ export default function ReviewStep() {
     return m;
   }, [groups, approved, rejected, locked]);
 
+  // Global-net groups are a last-resort balancing action, not evidenced matches —
+  // kept out of the main review list and surfaced separately below.
+  const netGroups = useMemo(
+    () => groups.filter((g) => g.kind === 'net').sort((a, b) => a.id.localeCompare(b.id)),
+    [groups],
+  );
   const sorted = useMemo(
     () =>
-      [...groups].sort(
-        (a, b) =>
-          Number(b.kind === 'net') - Number(a.kind === 'net') ||
-          Number(b.inScenario) - Number(a.inScenario) ||
-          b.confidence - a.confidence ||
-          a.id.localeCompare(b.id),
-      ),
+      groups
+        .filter((g) => g.kind !== 'net')
+        .sort(
+          (a, b) =>
+            Number(b.inScenario) - Number(a.inScenario) ||
+            b.confidence - a.confidence ||
+            a.id.localeCompare(b.id),
+        ),
     [groups],
   );
 
@@ -156,6 +163,13 @@ export default function ReviewStep() {
       return true;
     });
   }, [sorted, viewAll, isRepresentative, clusterShown, kindFilter, tierFilter, statusFilter, onlyAlts, needle, decisions, altCounts, searchIndex]);
+
+  // Currently-filtered groups that can still be approved (pending = not already
+  // decided and not blocked by an approved conflict). Drives "Approve all filtered".
+  const approvableVisible = useMemo(
+    () => visible.filter((g) => decisions.get(g.id) === 'pending'),
+    [visible, decisions],
+  );
 
   // Windowed rendering: sentinel loads the next page as it scrolls into view.
   useEffect(() => setRenderCount(PAGE), [viewAll, tierFilter, statusFilter, kindFilter, onlyAlts, needle]);
@@ -308,6 +322,14 @@ export default function ReviewStep() {
           Approve all high confidence
         </button>
         <button
+          onClick={() => bulkApprove(approvableVisible)}
+          disabled={approvableVisible.length === 0}
+          title="Approve every group matching the current filters/search below"
+          className="rounded-md bg-emerald-600/15 px-3 py-1.5 font-medium text-emerald-700 hover:bg-emerald-600/25 disabled:opacity-40 dark:text-emerald-400"
+        >
+          Approve all filtered ({approvableVisible.length})
+        </button>
+        <button
           onClick={resetDecisions}
           className="rounded-md bg-black/5 px-3 py-1.5 hover:bg-black/10 dark:bg-white/10"
         >
@@ -402,6 +424,34 @@ export default function ReviewStep() {
           </p>
         )}
       </div>
+
+      {/* Last resort — global netting, kept out of the suggested cleanup. */}
+      {netGroups.length > 0 && (
+        <div className="space-y-2 rounded-xl border border-amber-500/40 bg-amber-500/[0.04] p-3">
+          <div className="flex flex-wrap items-baseline gap-2">
+            <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-amber-800 dark:text-amber-300">
+              Last resort
+            </span>
+            <span className="text-sm font-semibold">Force-balance the residual to zero</span>
+          </div>
+          <p className="text-xs opacity-70">
+            Not an evidenced match. Global netting just picks whatever offsets sum to the
+            remaining unmatched total so the account nets to zero — true of almost any residual,
+            so it carries deliberately low confidence and is <b>excluded from the suggested
+            cleanup and bulk approvals</b>. Use it only after reviewing the individual matches above.
+          </p>
+          {netGroups.map((g) => (
+            <GroupRow
+              key={g.id}
+              group={g}
+              entryMap={entryMap}
+              decision={decisions.get(g.id)!}
+              siblings={null}
+              actions={actions}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

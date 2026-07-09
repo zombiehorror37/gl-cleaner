@@ -96,7 +96,10 @@ export function scoreEvidence(targets: Entry[], offsets: Entry[]): Evidence {
     }
   }
   if (minDocDist === 0) {
-    score += 42;
+    // An identical document number on an exact equal-and-opposite amount is the
+    // signature of a voucher reversed against itself — strong enough that a clean
+    // 1:1 pair reaches the high tier on this signal alone (8 + 48 + 14 = 70).
+    score += 48;
     signals++;
     reasons.push('identical doc numbers');
   } else if (minDocDist <= 3) {

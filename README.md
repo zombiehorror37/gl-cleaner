@@ -15,10 +15,13 @@ Find and remove offsetting general-ledger entries — the automated version of "
    - ambiguous amount clusters shown as clusters, alternatives labeled `alt x/y`;
    - approving a group locks its entries — conflicting groups grey out;
    - a set-packing **scenario optimizer** suggests the assignment that cleans the most rows;
-   - a **global netting solver** sweeps the residual: one group clearing ALL remaining
-     unnatural-side entries against an exactly-summing offset subset (solved on the cheaper of
-     the direct/complement sides — GCD-reduced DP with reconstruction, branch-and-bound
-     fallback). One run + one click = zero open negatives whenever mathematically possible;
+   - a **global netting solver** offered as an explicit **last resort**, kept out of the
+     suggested cleanup: after every evidenced match is exhausted it sweeps the residual into one
+     group clearing ALL remaining unnatural-side entries against an exactly-summing offset subset
+     (solved on the cheaper of the direct/complement sides — GCD-reduced DP with reconstruction,
+     branch-and-bound fallback). It is a *balancing* action, not a match, so it carries
+     deliberately low, size-decaying confidence and must be approved on its own — approve it and
+     zero open negatives remain whenever mathematically possible;
    - every target labeled matched / **proven unmatchable** (bitset oracle proof) / none within limits / budget exhausted.
 5. **Export** a new workbook: Detail (all rows annotated Status/Group/Type, open negatives red, live Excel check formulas), Cleaned GL, Removed Entries (group IDs + reasons), Summary (reconciliation). Hard invariants checked before export: every group sums to exactly 0, no entry in two groups, cleaned total equals original total.
 

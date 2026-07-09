@@ -9,9 +9,12 @@ import { guessMapping } from '../lib/template';
 import { runAccount } from '../lib/engine/run';
 import { groupEntryIds, DEFAULT_SEARCH } from '../lib/engine/types';
 
-const DESKTOP = 'C:\\Users\\zombi\\Desktop\\Book1.xlsx';
-const NETTED = 'C:\\Users\\zombi\\Downloads\\Book1_netted.xlsx';
-const src = existsSync(DESKTOP) ? DESKTOP : existsSync(NETTED) ? NETTED : null;
+const CANDIDATES = [
+  'C:\\Users\\zombi\\Desktop\\Book1.xlsx',
+  'C:\\Users\\zombi\\Desktop\\Book1 (2).xlsx',
+  'C:\\Users\\zombi\\Downloads\\Book1_netted.xlsx',
+];
+const src = CANDIDATES.find((p) => existsSync(p)) ?? null;
 
 if (!src) {
   describe.skip('Book1 baseline (sample file not found)', () => {
@@ -76,18 +79,29 @@ if (!src) {
       }
     });
 
-    it('ONE run + approve suggested leaves ZERO negatives open (script parity)', () => {
-      const suggested = result.groups.filter((g) => g.inScenario);
-      const used = new Set(suggested.flatMap((g) => groupEntryIds(g)));
-      // suggested groups are mutually disjoint
-      expect(used.size).toBe(suggested.reduce((s, g) => s + groupEntryIds(g).length, 0));
+    it('the global net is a low-confidence last resort, excluded from the suggested scenario', () => {
+      const net = result.groups.find((g) => g.kind === 'net');
+      expect(net).toBeDefined();
+      expect(net!.inScenario).toBe(false);
+      expect(net!.tier).toBe('low'); // honest: bulk balancing, not evidence
+    });
+
+    it('suggested cleanup + the net sweep leaves ZERO negatives open (script parity)', () => {
+      // Suggested = evidenced matches only; the net sweep is approved separately as
+      // a deliberate last resort. Together they still reach the reference script's 0.
+      const cleared = [
+        ...result.groups.filter((g) => g.inScenario),
+        ...result.groups.filter((g) => g.kind === 'net'),
+      ];
+      const used = new Set(cleared.flatMap((g) => groupEntryIds(g)));
+      // scenario groups and the net sweep are mutually disjoint
+      expect(used.size).toBe(cleared.reduce((s, g) => s + groupEntryIds(g).length, 0));
       const openNegs = entries.filter((e) => e.amount < 0 && !used.has(e.id));
       expect(result.netReport).not.toBeNull();
       expect(result.netReport!.strandedTargetIds).toHaveLength(0);
       expect(openNegs).toHaveLength(0); // the reference script achieves 0 — so must we
-      // every suggested group sums to zero
       const map = new Map(entries.map((e) => [e.id, e]));
-      for (const g of suggested) {
+      for (const g of cleared) {
         expect(groupEntryIds(g).reduce((s, id) => s + map.get(id)!.amount, 0)).toBe(0);
       }
     });

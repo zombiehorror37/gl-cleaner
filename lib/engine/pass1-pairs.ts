@@ -1,5 +1,13 @@
-import { scoreGroup } from './confidence';
+import { contest, scoreEvidence, tierFor } from './confidence';
 import type { AmountCluster, Entry, MatchGroup } from './types';
+
+/** Best evidence in a sorted-desc list, using every value but one instance of `e`. */
+function bestExcluding(sortedDesc: number[], e: number): number {
+  if (sortedDesc.length <= 1) return -Infinity;
+  // The chosen pair is the unique max ⇒ next value is the best rival; a tie at the
+  // top ⇒ that equal value stays and the margin is (correctly) zero.
+  return sortedDesc[0] !== e ? sortedDesc[0] : sortedDesc[1];
+}
 
 export interface Pass1Result {
   groups: MatchGroup[];
@@ -49,18 +57,28 @@ export function findExactPairs(entries: Entry[], account: string): Pass1Result {
       });
     }
 
-    // Score every cross pairing, then greedy-assign best first (deterministic:
-    // ties broken by row order).
-    const candidates: { p: Entry; n: Entry; confidence: number }[] = [];
+    // Score every cross pairing by raw evidence, then greedy-assign best first
+    // (deterministic: ties broken by row order). Competition is folded in only
+    // when the group is emitted, so a pairing that decisively out-scores its
+    // rivals keeps its evidence instead of eating a flat ambiguity penalty.
+    const candidates: { p: Entry; n: Entry; ev: number; reasons: string[] }[] = [];
+    const evByN = new Map<number, number[]>(); // n.id -> evidences over all positives
+    const evByP = new Map<number, number[]>(); // p.id -> evidences over all negatives
     for (const p of pos) {
       for (const n of neg) {
-        const { confidence } = scoreGroup({ targets: [n], offsets: [p], competingAlternatives: 0 });
-        candidates.push({ p, n, confidence });
+        const { score, reasons } = scoreEvidence([n], [p]);
+        candidates.push({ p, n, ev: score, reasons });
+        (evByN.get(n.id) ?? evByN.set(n.id, []).get(n.id)!).push(score);
+        (evByP.get(p.id) ?? evByP.set(p.id, []).get(p.id)!).push(score);
       }
     }
-    candidates.sort(
-      (a, b) => b.confidence - a.confidence || a.p.id - b.p.id || a.n.id - b.n.id,
-    );
+    for (const list of evByN.values()) list.sort((a, b) => b - a);
+    for (const list of evByP.values()) list.sort((a, b) => b - a);
+    candidates.sort((a, b) => b.ev - a.ev || a.p.id - b.p.id || a.n.id - b.n.id);
+
+    // Conflict degree: how many other pairings compete for this pair's positive
+    // or negative (a pairing (p',n') with p'≠p and n'≠n does not conflict).
+    const crowd = ambiguous ? pos.length - 1 + (neg.length - 1) : 0;
 
     const usedP = new Set<number>();
     const usedN = new Set<number>();
@@ -68,11 +86,19 @@ export function findExactPairs(entries: Entry[], account: string): Pass1Result {
       if (usedP.has(c.p.id) || usedN.has(c.n.id)) continue;
       usedP.add(c.p.id);
       usedN.add(c.n.id);
-      const { confidence, tier, reasons } = scoreGroup({
-        targets: [c.n],
-        offsets: [c.p],
-        competingAlternatives: ambiguous ? pos.length * neg.length - 1 : 0,
-      });
+
+      // Margin = how far this pairing leads the best conflicting alternative (a
+      // different positive for the same negative, or vice-versa).
+      const rival = Math.max(
+        bestExcluding(evByN.get(c.n.id)!, c.ev),
+        bestExcluding(evByP.get(c.p.id)!, c.ev),
+      );
+      const margin = rival === -Infinity ? c.ev : c.ev - rival;
+      const confidence = contest(c.ev, crowd, margin);
+      const reasons = [...c.reasons];
+      if (crowd > 0) {
+        reasons.push(margin >= 12 ? 'clearest of the alternatives' : `${crowd} competing entr${crowd === 1 ? 'y' : 'ies'} at this amount — review`);
+      }
       groups.push({
         id: `${account}|pair|${seq++}`,
         account,
@@ -80,7 +106,7 @@ export function findExactPairs(entries: Entry[], account: string): Pass1Result {
         targetIds: [c.n.id],
         offsetIds: [c.p.id],
         confidence,
-        tier,
+        tier: tierFor(confidence),
         reasons,
         clusterKey,
         inScenario: false,

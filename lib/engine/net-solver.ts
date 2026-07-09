@@ -259,8 +259,16 @@ function buildGroup(
       },
     };
   }
+  const complete = dropped.length === 0;
+  const n = kept.length + chosenOffsets.length;
+  // A global net is a *balancing* action, not evidence: it merely proves a subset
+  // of offsets sums to the residual total — true of ANY residual whose magnitudes
+  // permit it. So trust must stay low and decay as the lump grows (a 2-entry net
+  // ≈ a missed pair; a 200-entry net is pure subset-sum coincidence). Always well
+  // below the medium tier, and a partial sweep earns even less.
+  const confidence = Math.max(2, Math.round((complete ? 50 : 30) / Math.sqrt(n)));
   const reasons = [
-    `global netting: clears ${kept.length} ${side} entr${kept.length === 1 ? 'y' : 'ies'} with ${chosenOffsets.length} offsets`,
+    `⚠ last-resort bulk balancing — nets ${kept.length} residual ${side} entr${kept.length === 1 ? 'y' : 'ies'} against ${chosenOffsets.length} offsets summing to the same total; entries are NOT individually matched`,
   ];
   if (dropped.length > 0) {
     reasons.push(`${dropped.length} ${side} entr${dropped.length === 1 ? 'y' : 'ies'} could not be cleared, left open`);
@@ -272,13 +280,13 @@ function buildGroup(
       kind: 'net',
       targetIds: kept.map((e) => e.id),
       offsetIds: chosenOffsets.map((e) => e.id),
-      // A complete sweep is an arithmetic certainty (every remaining entry
-      // cleared); a partial one leaves residue, so it earns less trust.
-      confidence: dropped.length === 0 ? 92 : 62,
-      tier: tierFor(dropped.length === 0 ? 92 : 62),
+      confidence,
+      tier: tierFor(confidence),
       reasons,
       clusterKey: null,
-      inScenario: true,
+      // Never part of the suggested (evidenced) scenario — netting is a deliberate,
+      // separately-approved last resort surfaced only after every match is exhausted.
+      inScenario: false,
       altKey: null,
     },
     report: {

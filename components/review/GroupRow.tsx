@@ -50,7 +50,7 @@ function GroupRowInner({
         : decision === 'blocked'
           ? 'border-black/10 opacity-40 dark:border-white/10'
           : isNet
-            ? 'border-indigo-500/50 bg-indigo-500/[0.05]'
+            ? 'border-amber-500/50 bg-amber-500/[0.05]'
             : 'border-black/10 dark:border-white/10';
 
   const targetAbs = Math.abs(
@@ -79,14 +79,16 @@ function GroupRowInner({
         <span
           className={`rounded-full px-2 py-0.5 text-xs font-medium ${
             isNet
-              ? 'bg-indigo-600/15 text-indigo-700 dark:text-indigo-300'
+              ? 'bg-amber-500/20 text-amber-800 dark:text-amber-300'
               : 'bg-black/5 opacity-70 dark:bg-white/10'
           }`}
         >
           {KIND_LABELS[group.kind]}
         </span>
         <span className="text-xs opacity-60">
-          {group.targetIds.length} reversal → {group.offsetIds.length} offset
+          {isNet
+            ? `${group.targetIds.length} residual → ${group.offsetIds.length} offset`
+            : `${group.targetIds.length} reversal → ${group.offsetIds.length} offset`}
         </span>
 
         {group.inScenario && !isNet && (
