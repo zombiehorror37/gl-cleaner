@@ -7,7 +7,7 @@ import {
   type GroupKind,
   type MatchGroup,
 } from '@/lib/engine/types';
-import { allGroups, allOutcomes, isBlocked, lockedEntries, useStore } from '@/lib/store';
+import { allGroups, isBlocked, lockedEntries, useStore } from '@/lib/store';
 import GroupRow, { type GroupActions, type GroupDecision } from '@/components/review/GroupRow';
 
 type TierFilter = 'all' | ConfidenceTier;
@@ -52,7 +52,6 @@ export default function ReviewStep() {
   );
 
   const groups = useMemo(() => allGroups(runs), [runs]);
-  const outcomes = useMemo(() => allOutcomes(runs), [runs]);
   const entryMap = useMemo(() => new Map(entries.map((e) => [e.id, e])), [entries]);
   const locked = useMemo(() => lockedEntries(groups, approved), [groups, approved]);
 
@@ -232,25 +231,27 @@ export default function ReviewStep() {
 
   return (
     <div className="space-y-4">
-      {/* Summary bar */}
-      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-x-6 gap-y-1 rounded-xl border border-black/10 bg-white/90 px-4 py-3 text-sm backdrop-blur dark:border-white/10 dark:bg-zinc-950/90">
-        <span>
-          <b>{approvedGroups.length}</b> approved
-        </span>
-        <span>
-          <b>{removed.rows}</b> rows to remove
-        </span>
-        <span className={removed.sum === 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}>
-          removed sum: <b className="font-mono">{fromCents(removed.sum)}</b>{' '}
-          {removed.sum === 0 ? '✓' : '✗ MUST BE ZERO'}
-        </span>
-        <span className={openNegatives.count === 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}>
-          negatives left open: <b>{openNegatives.count}</b> ({fromCents(openNegatives.sum)})
-        </span>
+      {/* Summary bar — live reconciliation while you decide. */}
+      <div className="sticky top-[104px] z-10 flex flex-wrap items-center gap-2 rounded-xl border border-black/10 bg-white/90 p-2 backdrop-blur dark:border-white/10 dark:bg-zinc-950/90">
+        <Stat label="Approved" value={approvedGroups.length} />
+        <Stat label="Rows to remove" value={removed.rows} />
+        <Stat
+          label="Removed sum"
+          value={fromCents(removed.sum)}
+          mono
+          tone={removed.sum === 0 ? 'good' : 'bad'}
+          hint={removed.sum === 0 ? 'balances ✓' : 'must be 0'}
+        />
+        <Stat
+          label="Negatives left open"
+          value={`${openNegatives.count}`}
+          tone={openNegatives.count === 0 ? 'good' : 'warn'}
+          hint={fromCents(openNegatives.sum)}
+        />
         <button
           onClick={() => setStep('export')}
           disabled={approvedGroups.length === 0 || removed.sum !== 0}
-          className="ml-auto rounded-lg bg-indigo-600 px-5 py-1.5 font-semibold text-white hover:bg-indigo-500 disabled:opacity-40"
+          className="ml-auto rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-40"
         >
           Continue → Export
         </button>
@@ -273,11 +274,30 @@ export default function ReviewStep() {
         </div>
       )}
 
-      {/* Bulk actions */}
+      {/* View toggle + bulk actions */}
       <div className="flex flex-wrap items-center gap-2 text-sm">
+        <div className="inline-flex rounded-lg border border-black/10 p-0.5 dark:border-white/10">
+          <button
+            onClick={() => setViewAll(false)}
+            className={`rounded-md px-3 py-1 font-medium transition ${
+              !viewAll ? 'bg-indigo-600 text-white' : 'opacity-70 hover:opacity-100'
+            }`}
+          >
+            Suggested cleanup
+          </button>
+          <button
+            onClick={() => setViewAll(true)}
+            className={`rounded-md px-3 py-1 font-medium transition ${
+              viewAll ? 'bg-indigo-600 text-white' : 'opacity-70 hover:opacity-100'
+            }`}
+          >
+            Explore all groups
+          </button>
+        </div>
+        <div className="mx-1 h-6 w-px bg-black/10 dark:bg-white/10" />
         <button
           onClick={() => bulkApprove(sorted.filter((g) => g.inScenario))}
-          className="rounded-md bg-indigo-600 px-3 py-1.5 font-semibold text-white hover:bg-indigo-500"
+          className="rounded-md bg-emerald-600 px-3 py-1.5 font-semibold text-white hover:bg-emerald-500"
         >
           Approve suggested cleanup
         </button>
@@ -293,10 +313,6 @@ export default function ReviewStep() {
         >
           Reset
         </button>
-        <label className="ml-2 flex items-center gap-1.5">
-          <input type="checkbox" checked={viewAll} onChange={(e) => setViewAll(e.target.checked)} />
-          Explore all groups
-        </label>
       </div>
 
       {/* Filters — always available */}
@@ -385,6 +401,38 @@ export default function ReviewStep() {
             No groups match the current filters.
           </p>
         )}
+      </div>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  mono = false,
+  tone,
+  hint,
+}: {
+  label: string;
+  value: string | number;
+  mono?: boolean;
+  tone?: 'good' | 'bad' | 'warn';
+  hint?: string;
+}) {
+  const toneCls =
+    tone === 'good'
+      ? 'text-emerald-600 dark:text-emerald-400'
+      : tone === 'bad'
+        ? 'text-red-500'
+        : tone === 'warn'
+          ? 'text-amber-600 dark:text-amber-400'
+          : '';
+  return (
+    <div className="rounded-lg px-3 py-1.5">
+      <div className="text-[11px] uppercase tracking-wide opacity-50">{label}</div>
+      <div className={`flex items-baseline gap-1.5 ${toneCls}`}>
+        <span className={`text-lg font-semibold ${mono ? 'font-mono tabular-nums' : ''}`}>{value}</span>
+        {hint && <span className="text-xs opacity-70">{hint}</span>}
       </div>
     </div>
   );

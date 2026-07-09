@@ -1,5 +1,5 @@
 import { subsetSumReachable } from './bitset-dp';
-import { scoreGroup } from './confidence';
+import { contest, scoreEvidence, tierFor } from './confidence';
 import type { Entry, MatchGroup, SearchConfig, TargetOutcome } from './types';
 
 const DAY_MS = 86_400_000;
@@ -260,22 +260,33 @@ export function findCombos(
     const res = searchCombosForTarget(target, naturalPool, config);
     statesExplored += res.statesExplored;
 
-    // Rank alternatives by confidence, deterministic tie-break by member ids.
-    const scored = res.combos
-      .map((combo) => {
-        const { confidence, tier, reasons } = scoreGroup({
-          targets: [target],
-          offsets: combo,
-          competingAlternatives: res.totalFound - 1,
-        });
-        return { combo, confidence, tier, reasons };
-      })
+    // Score raw evidence for every alternative, then rank. Competition is folded
+    // in afterwards using the field's decisiveness: the leader keeps its score
+    // when it clearly beats the runner-up, while near-ties all get marked down
+    // so the reviewer sees "these are genuinely ambiguous — pick one".
+    const evald = res.combos
+      .map((combo) => ({ combo, ...scoreEvidence([target], combo) }))
       .sort(
         (a, b) =>
-          b.confidence - a.confidence ||
+          b.score - a.score ||
           a.combo.length - b.combo.length ||
           String(a.combo.map((e) => e.id)).localeCompare(String(b.combo.map((e) => e.id))),
       );
+
+    const crowd = evald.length - 1;
+    const bestEvidence = evald[0]?.score ?? 0;
+    const runnerUp = evald[1]?.score ?? 0;
+    const scored = evald.map((e, i) => {
+      const margin = i === 0 ? bestEvidence - runnerUp : 0;
+      const confidence = contest(e.score, crowd, margin);
+      const reasons = [...e.reasons];
+      if (crowd > 0) {
+        if (i === 0 && margin >= 12) reasons.push('clearest of the alternatives');
+        else if (i === 0) reasons.push(`${crowd} close alternative${crowd > 1 ? 's' : ''} — review`);
+        else reasons.push(`alternative — ${crowd} other${crowd > 1 ? 's' : ''} clear this amount`);
+      }
+      return { combo: e.combo, confidence, tier: tierFor(confidence), reasons };
+    });
 
     const altKey = `${account}|t|${target.id}`;
     for (const s of scored) {

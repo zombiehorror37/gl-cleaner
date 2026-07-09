@@ -12,6 +12,17 @@ import {
 } from '@/lib/template';
 import { useStore } from '@/lib/store';
 
+const sampleOf = (rows: unknown[][], col: number): string => {
+  if (col < 0) return '';
+  for (const r of rows) {
+    const v = r[col];
+    if (v === null || v === undefined || v === '') continue;
+    const s = v instanceof Date ? v.toLocaleDateString() : String(v);
+    return s.length > 28 ? s.slice(0, 27) + '…' : s;
+  }
+  return '';
+};
+
 export default function MapStep() {
   const workbook = useStore((s) => s.workbook);
   const sheetIndex = useStore((s) => s.sheetIndex);
@@ -48,6 +59,11 @@ export default function MapStep() {
     return buildEntries(sheet.rows, mapping);
   }, [sheet, mapping]);
 
+  const mappedCount = useMemo(
+    () => TEMPLATE_FIELDS.filter((f) => mapping[f.field] >= 0).length,
+    [mapping],
+  );
+
   if (!sheet) return <p>No file loaded.</p>;
 
   const setField = (field: keyof ColumnMapping, col: number) => {
@@ -67,42 +83,97 @@ export default function MapStep() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-xl font-bold tracking-tight">Map onto the GL header</h2>
+        <p className="mt-1 text-sm opacity-70">
+          The matcher reads a fixed set of GL columns. Line up each one with a column from your file
+          — <b>Amount</b> is required; every other field you map sharpens the confidence scoring.
+        </p>
+      </div>
+
       {autoNote && (
         <p className="rounded-lg bg-indigo-500/10 px-4 py-2 text-sm text-indigo-700 dark:text-indigo-300">
           {autoNote}
         </p>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {TEMPLATE_FIELDS.map((spec) => (
-          <label key={spec.field} className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">
-              {spec.label}
-              {spec.required && <span className="text-red-500"> *</span>}
-            </span>
-            <select
-              value={mapping[spec.field]}
-              onChange={(e) => setField(spec.field, Number(e.target.value))}
-              className="rounded-md border border-black/15 bg-transparent px-2 py-1.5 dark:border-white/20 dark:bg-zinc-900"
-            >
-              <option value={-1}>— not mapped —</option>
-              {sheet.headers.map((h, i) => (
-                <option key={i} value={i}>
-                  {h || `(col ${i + 1})`}
-                </option>
-              ))}
-            </select>
-          </label>
-        ))}
+      {/* Fixed GL header ↔ source column mapping */}
+      <div className="overflow-hidden rounded-xl border border-black/10 dark:border-white/10">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-black/[0.03] text-xs uppercase tracking-wide opacity-60 dark:bg-white/[0.04]">
+            <tr>
+              <th className="px-4 py-2 font-semibold">GL field</th>
+              <th className="px-4 py-2 font-semibold">Your column</th>
+              <th className="px-4 py-2 font-semibold">Sample value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {TEMPLATE_FIELDS.map((spec, i) => {
+              const col = mapping[spec.field];
+              const unmappedRequired = spec.required && col < 0;
+              return (
+                <tr
+                  key={spec.field}
+                  className="border-t border-black/5 dark:border-white/5"
+                >
+                  <td className="px-4 py-2.5">
+                    <span className="flex items-center gap-2">
+                      <span className="grid h-5 w-5 place-items-center rounded bg-black/5 text-[10px] font-semibold opacity-60 dark:bg-white/10">
+                        {i + 1}
+                      </span>
+                      <span className="font-medium">{spec.label}</span>
+                      {spec.required && (
+                        <span className="rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 dark:text-red-400">
+                          required
+                        </span>
+                      )}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2">
+                    <select
+                      value={col}
+                      onChange={(e) => setField(spec.field, Number(e.target.value))}
+                      className={`w-full max-w-xs rounded-md border bg-transparent px-2 py-1.5 dark:bg-zinc-900 ${
+                        unmappedRequired
+                          ? 'border-red-500/60'
+                          : col >= 0
+                            ? 'border-emerald-500/40'
+                            : 'border-black/15 dark:border-white/20'
+                      }`}
+                    >
+                      <option value={-1}>— not mapped —</option>
+                      {sheet.headers.map((h, j) => (
+                        <option key={j} value={j}>
+                          {h || `(col ${j + 1})`}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="px-4 py-2 font-mono text-xs opacity-60">
+                    {col >= 0 ? sampleOf(sheet.rows, col) || <span className="opacity-40">(empty)</span> : '—'}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div className="flex items-center justify-between border-t border-black/5 bg-black/[0.02] px-4 py-2 text-xs opacity-70 dark:border-white/5 dark:bg-white/[0.02]">
+          <span>
+            {mappedCount}/{TEMPLATE_FIELDS.length} GL fields mapped
+          </span>
+          {mapping.amount < 0 && <span className="text-red-500">Map the Amount column to continue.</span>}
+        </div>
       </div>
 
+      {/* Reusable templates */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-black/10 p-4 dark:border-white/10">
+        <span className="text-sm font-medium opacity-70">Reuse this mapping:</span>
         <input
           value={templateName}
           onChange={(e) => setTemplateName(e.target.value)}
           placeholder="Template name (e.g. Oracle GL export)"
-          className="w-64 rounded-md border border-black/15 bg-transparent px-3 py-1.5 text-sm dark:border-white/20 dark:bg-zinc-900"
+          className="w-60 rounded-md border border-black/15 bg-transparent px-3 py-1.5 text-sm dark:border-white/20 dark:bg-zinc-900"
         />
         <button
           disabled={!templateName.trim()}
@@ -145,7 +216,7 @@ export default function MapStep() {
       </div>
 
       {preview && (
-        <div className="flex flex-wrap items-center gap-4 rounded-xl border border-black/10 p-4 text-sm dark:border-white/10">
+        <div className="sticky bottom-0 flex flex-wrap items-center gap-4 rounded-xl border border-black/10 bg-white/90 p-4 text-sm backdrop-blur dark:border-white/10 dark:bg-zinc-950/90">
           <span>
             <b>{preview.entries.length}</b> rows parsed
           </span>
@@ -166,9 +237,6 @@ export default function MapStep() {
             Continue → Configure
           </button>
         </div>
-      )}
-      {mapping.amount < 0 && (
-        <p className="text-sm text-red-500">Map the Amount column to continue.</p>
       )}
     </div>
   );

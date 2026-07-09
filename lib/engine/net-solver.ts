@@ -1,4 +1,5 @@
 import { gcd } from './cents';
+import { tierFor } from './confidence';
 import type { Entry, MatchGroup, NetReport } from './types';
 
 /** Max DP states for exact reconstruction (Uint8+Int32: 5 bytes/state ⇒ 160 MB cap). */
@@ -271,8 +272,10 @@ function buildGroup(
       kind: 'net',
       targetIds: kept.map((e) => e.id),
       offsetIds: chosenOffsets.map((e) => e.id),
-      confidence: dropped.length === 0 ? 90 : 75,
-      tier: dropped.length === 0 ? 'high' : 'medium',
+      // A complete sweep is an arithmetic certainty (every remaining entry
+      // cleared); a partial one leaves residue, so it earns less trust.
+      confidence: dropped.length === 0 ? 92 : 62,
+      tier: tierFor(dropped.length === 0 ? 92 : 62),
       reasons,
       clusterKey: null,
       inScenario: true,

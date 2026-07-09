@@ -6,6 +6,8 @@ export interface Entry {
   id: number;
   /** Account key; empty string when the file has no account column. */
   account: string;
+  /** Human-readable account name, when the file maps one. */
+  accountName?: string | null;
   /** Epoch milliseconds, or null when unparseable/missing. */
   date: number | null;
   docNo: string | null;

@@ -76,6 +76,7 @@ export function buildEntries(rows: unknown[][], mapping: ColumnMapping, precisio
     entries.push({
       id: i,
       account,
+      accountName: cellStr(get('accountName')),
       date: cellDate(get('date')),
       docNo: cellStr(get('docNo')),
       docType: cellStr(get('docType')),
