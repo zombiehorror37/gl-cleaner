@@ -361,3 +361,37 @@ describe('GL accounts (accruals, reversals, SAP exports)', () => {
     ]);
   });
 });
+
+describe('review fixes', () => {
+  it('GL file with several accounts: journals hitting two accounts are not flagged', () => {
+    const { res, suggested } = run(
+      [
+        ['52701001', '0500003782', 'AB', '2025-01-31', null, 'ACC-1/2025E06-ELEC', 2418999.8],
+        ['21100001', '0500003782', 'AB', '2025-01-31', null, 'ACC-1/2025E06-ELEC', -2418999.8],
+        ['52701001', '0500004314', 'AB', '2025-02-24', null, 'R/ACR E6 1/25', -2418999.8],
+        ['21100001', '0500004314', 'AB', '2025-02-24', null, 'R/ACR E6 1/25', 2418999.8],
+      ],
+      { glAccount: true },
+    );
+    expect(suggested).toHaveLength(2);
+    expect(res.exceptions.filter((e) => e.kind === 'shared-id' || e.kind === 'misposting')).toEqual([]);
+  });
+
+  it('an amount-only combination from round amounts is proposed, not suggested', () => {
+    // Powers of two: exactly one combination (1,000 + 2,000 + 4,000) clears 7,000, but every amount is round.
+    const lines: Line[] = [1, 2, 4, 8, 16, 32, 64].map((k, i) => ['C1', `INV-${i}`, 'Invoice', '2025-01-01', null, null, k * 1000] as Line);
+    lines.push(['C1', 'TRF-1', 'Transfer', '2025-02-01', null, null, -7000]);
+    const { res, suggested } = run(lines, { balanceForward: false });
+    const combo = res.groups.find((g) => g.kind === 'combo')!;
+    expect(combo.memberIds).toHaveLength(4);
+    expect(combo.suggested).toBe(false);
+    expect(combo.reasons.join(' ')).toMatch(/amount-only.*by chance/);
+    expect(suggested).toHaveLength(0);
+  });
+
+  it('coincidence risk: tiny for a few odd amounts, large for round numbers', async () => {
+    const { coincidenceRisk } = await import('../lib/engine/clean');
+    expect(coincidenceRisk([120000, 340000, 56000, 99900], 516000, 6)).toBeLessThan(0.01);
+    expect(coincidenceRisk(Array.from({ length: 30 }, (_, i) => ((i % 7) + 1) * 1000000), 15000000, 6)).toBeGreaterThan(1);
+  });
+});

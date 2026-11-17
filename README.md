@@ -39,27 +39,45 @@ The headers must be exactly these nine, in this order. Matching ignores case, ex
 
 ## How matching works (per contact)
 
-You choose the ledger side: **Receivables** (invoices +) or **Payables** (invoices −). The app suggests one from how the document types are signed and warns if your choice disagrees.
+**Pick the ledger:**
+- **Receivables:** invoices are positive (+).
+- **Payables:** invoices are negative (−).
+- **GL account:** accruals, clearing, suspense or expense. Debits are positive and credits negative. Each "contact" is an account, journals may hit several accounts, and there is no balance-forward or "unapplied cash" logic.
+
+The app suggests a ledger from the document types, including SAP codes such as DR/KR/DZ/KZ/SA/AB.
 
 1. **Zero-value lines:** cleared.
 2. **Same Transaction Id:** a posting and its reversal, or an invoice settled under the same id. The same id posted twice for the same amount is flagged as a **duplicate**.
-3. **Reference links:** a payment or credit note whose Reference or Description cites another line's Transaction Id (`INV-1001`, `inv 1001/1002`, `Pmt for 1001`), or lines sharing an uncommon Reference. The app tries these in order:
-   - a full settlement;
-   - a settlement completed by an unreferenced second instalment;
-   - a **partial settlement**, where the invoice stays open for the remainder (FIFO across several invoices).
+3. **Links:**
+   - a line whose Reference or Description cites another line's Transaction Id (`INV-1001`, `inv 1001/1002`);
+   - lines sharing an uncommon Reference;
+   - lines whose descriptions carry the same identifiers, e.g. meter + period, so `ACC-1/2025E07-ELEC` matches `R/ACR E7 1/25`.
+
+   The app then tries, in order: a full settlement; a settlement completed by an unreferenced second instalment; or a **partial settlement**, where the document stays open for the remainder (FIFO across several invoices). If lines are linked only by their descriptions and the amounts differ, the match is proposed but never suggested.
 4. **Exact amounts without links:**
-   - the only charge/settlement pair of an amount;
-   - identical amounts paired **oldest-first** (monthly rent, retainers);
-   - one payment covering several invoices, or one invoice paid in instalments (subset search).
-   
-   When several combinations fit, they are offered as alternatives and not suggested.
-5. **Nil contacts:** everything left on the contact nets to zero.
-6. **Near misses** (proposed only, approved one by one): differences within a tolerance (bank charges, FX, rounding), or equal to a withholding/discount rate on the gross or pre-VAT amount (e.g. 1% WHT on an invoice that includes 14% VAT).
-7. **Balance-forward (FIFO)** (proposed only, approved one by one): leftover payments are applied to the oldest invoices.
+   - the only pair of an amount;
+   - identical amounts paired **oldest-first**;
+   - one line equal to several on the other side.
 
-A line whose Reference cites a document that belongs to *another* contact is never amount-matched. It is flagged as a **possible wrong-contact posting**.
+   When several combinations fit, they are offered as alternatives. An amount-only combination is suggested only when a coincidence is unlikely. The app estimates the chance from the number of candidate lines and how round the amounts are.
+5. **Nil contacts:** everything left nets to zero.
+6. **Near misses** (approved one by one): differences within a tolerance, or equal to a withholding/discount rate on the gross or pre-VAT amount. The difference must be small next to the amounts themselves.
+7. **Balance-forward (FIFO)** (receivables/payables only, approved one by one): leftover payments are applied to the oldest invoices.
 
-**Residual lines.** When an approved match doesn't fully net (partial payment, near miss, FIFO), the part-settled document stays in the open items with its remaining amount. It keeps its own Transaction Id, dates and reference. So **the open-items total always equals the original total**, and export refuses to run if it doesn't.
+A line that cites a document belonging to *another* contact is never amount-matched. It is flagged as a **possible wrong-contact posting** (customer/supplier ledgers only).
+
+**Notes the app adds:** open lines that refer to a period before the file starts, accruals for the last period whose reversal falls after the file ends, and descriptions whose Arabic text was replaced by `#` in the export.
+
+**Residual lines.** When an approved match doesn't fully net, the part-settled document stays in the open items with its remaining amount. It keeps its own Transaction Id, dates and reference. So **the open-items total always equals the original total**, and export refuses to run if it doesn't.
+
+## Reviewing
+
+- **Tags:** every proposal has a type tag in one of three colour families: blue = *document match*, violet = *amount match*, amber = *needs judgement*. Each also has a confidence tag. Hover the confidence to see how the score was built: the starting score, the evidence points, and any ceiling.
+- **Filters:** click any tag, facet, family name or contact to filter by it.
+- **Rows:** each proposal is one line; click it to see the full lines.
+- **Bulk approval:** "Approve all suggested" and "Approve N shown" never include near misses, balance-forward or alternatives.
+- **Keyboard:** `j`/`k` move, `Enter` expands, `a` approves, `d` dismisses, `u` undoes, `/` searches, `?` shows help.
+- **Saved decisions:** decisions are saved in this browser for each file, matched on the file's content. They come back after a refresh, a re-upload of the same data, or a re-run with different settings. Settings are remembered too.
 
 ## Output workbook
 
@@ -67,8 +85,8 @@ A line whose Reference cites a document that belongs to *another* contact is nev
 |-------|----------|
 | Open Items | The cleaned ledger in the exact template. It can be re-imported. |
 | Detail | Every line with Status (Open / Cleared / Part-settled), open amount, match id, type, confidence, reasons |
-| Matches | One row per approved match |
-| Exceptions | Duplicates, wrong-contact postings, sign problems, unapplied cash, credit balances, ambiguous matches, search limits |
+| Matches | Every proposal with your decision (approved / dismissed / not reviewed), how its confidence was scored, and why |
+| Exceptions | Duplicates, wrong-contact postings, sign problems, unapplied cash, credit balances, ambiguous matches, out-of-period counterparts, lost text, search limits |
 | Rejected Rows | Excluded rows and why |
 | Contact Summary | Original vs open balance per contact, with live Excel checks |
 | Summary | Settings, counts, totals, live integrity checks |
@@ -89,5 +107,7 @@ Code map:
 - `lib/parse/`: file reading, cell parsing, document-type classification, row validation
 - `lib/engine/clean.ts`: the per-contact pipeline
 - `lib/engine/apply.ts`: approvals → open items + integrity checks
+- `lib/persist.ts`: saved decisions and settings (browser storage)
+- `lib/review-meta.ts`, `components/review/`: tag vocabulary, match rows
 - `lib/export.ts`: workbook output
 - `components/steps/`: the four screens

@@ -102,6 +102,14 @@ describe('sample ledger end-to-end', async () => {
     expect(Number(open.getRow(residual + 2).getCell(9).value)).toBe(5);
     expect(open.getRow(2).getCell(6).value).toBeInstanceOf(Date);
 
+    // Every proposal is listed with the reviewer's decision and its score explanation.
+    const matches = out.getWorksheet('Matches')!;
+    expect(matches.rowCount - 1).toBe(result.groups.length);
+    const decisions = new Set(matches.getColumn(2).values.slice(2) as string[]);
+    expect(decisions.has('Approved')).toBe(true);
+    expect(decisions.has('Not reviewed')).toBe(true);
+    expect(String(matches.getRow(2).getCell(7).value)).toMatch(/= \d+$/);
+
     // The cleaned template re-imports cleanly.
     const again = validateSheet(readWorkbook(buf, 'cleaned.xlsx').sheets[0].matrix);
     expect(again.headerOk).toBe(true);

@@ -124,7 +124,8 @@ export function cleanLedger(
      * matching here (and reported as a possible misposting).
      */
     const held = new Set<number>();
-    for (const r of list) {
+    // On a GL account one journal legitimately hits several accounts, so citing another account's document is normal.
+    for (const r of gl ? [] : list) {
       for (const t of new Set([...textTokens(r.reference), ...textTokens(r.description)])) {
         const owners = t.length >= 4 && t !== r.txnKey ? idOwners.get(t) : undefined;
         if (owners && !owners.has(key)) {
@@ -523,6 +524,17 @@ export function cleanLedger(
 
         const unique = res.totalFound === 1 && res.exhausted;
         const clearWinner = ranked.length > 1 && ranked[0].ev.documentary > 0 && ranked[0].pts - ranked[1].pts >= 10;
+        // An amount-only combination drawn from many lines (or from round amounts) can be pure chance.
+        const chance = coincidenceRisk(pool.map((r) => Math.abs(r.net)), Math.abs(t.net), settings.maxComboSize);
+        const risky = ranked[0].ev.documentary === 0 && chance > 0.05;
+        if ((unique || clearWinner) && risky) {
+          emit('combo', [t, ...ranked[0].ms], 40, [what(ranked[0].ms.length), `amount-only: with ${pool.length} candidate lines, about ${formatChance(chance)} such combination(s) would be expected by chance alone, so check it before approving`], {
+            suggested: false,
+            maxConfidence: 49,
+            basis: `The only combination found, but amount-only from ${pool.length} candidate lines, so it could be a coincidence`,
+          });
+          continue;
+        }
         if (unique || clearWinner) {
           const best = ranked[0];
           emit('combo', [t, ...best.ms], unique ? 58 : 50, [what(best.ms.length), unique ? 'the only combination that clears this amount' : `best-documented of ${res.totalFound} combinations`], {
@@ -574,7 +586,15 @@ export function cleanLedger(
       const cands: { c: LedgerRow; s: LedgerRow; d: number; wht: boolean; label: string; days: number }[] = [];
       const charges = fr.filter((r) => side(r) === 'charge');
       const settles = fr.filter((r) => side(r) === 'settlement');
-      if (charges.length * settles.length <= 250_000) {
+      if (charges.length * settles.length > 250_000) {
+        exceptions.push({
+          kind: 'search-limit',
+          severity: 'info',
+          contactKey: key,
+          rowIds: [],
+          message: `Near misses were not searched on this ${gl ? 'account' : 'contact'}: ${charges.length} × ${settles.length} unmatched lines is too many pairs to compare.`,
+        });
+      } else {
         for (const c of charges) {
           for (const s of settles) {
             const d = c.net + s.net;
@@ -694,7 +714,9 @@ export function cleanLedger(
   const contactByKey = new Map(contacts.map((c) => [c.key, c]));
   const shared = [...keyOwners].filter(([, o]) => o.size > 1);
   const idsAreGlobal = shared.length <= Math.max(3, keyOwners.size * 0.02);
-  if (idsAreGlobal) {
+  if (gl) {
+    // A GL journal (one document number) debits one account and credits another: shared ids are expected.
+  } else if (idsAreGlobal) {
     for (const [k, owners] of shared) {
       const ids = rows.filter((r) => r.txnKey === k).map((r) => r.id);
       exceptions.push({
@@ -754,7 +776,7 @@ export function cleanLedger(
     if (!l) byName.set(nk, (l = []));
     l.push(c.key);
   }
-  for (const [, keys] of byName) {
+  for (const [, keys] of gl ? [] : byName) {
     if (keys.length < 2) continue;
     const open = keys.flatMap((k) => [...freeByContact.get(k)!].map((id) => byId.get(id)!));
     for (const r of open) {
@@ -881,3 +903,32 @@ function largestZeroSubset(comp: LedgerRow[], side: (r: LedgerRow) => Side): Led
   if (!bestSize) return null;
   return comp.filter((_, i) => best & (1 << i));
 }
+
+/**
+ * Expected number of subsets (2..maxSize lines) of the pool that would hit the
+ * target by chance, if amounts were random within their range. Amounts sharing
+ * a large common factor (round numbers) make coincidences far more likely, so
+ * the range is measured in units of that factor.
+ */
+export function coincidenceRisk(values: number[], target: number, maxSize: number): number {
+  let g = target;
+  for (const v of values) g = gcdInt(g, v);
+  const range = Math.max(1, target / Math.max(1, g));
+  const n = values.length;
+  let subsets = 0;
+  let c = n; // C(n, 1)
+  for (let k = 2; k <= Math.min(maxSize, n); k++) {
+    c = (c * (n - k + 1)) / k; // C(n, k)
+    subsets += c;
+  }
+  return subsets / range;
+}
+
+function gcdInt(a: number, b: number): number {
+  a = Math.abs(a);
+  b = Math.abs(b);
+  while (b) [a, b] = [b, a % b];
+  return a;
+}
+
+const formatChance = (x: number) => (x >= 10 ? Math.round(x).toLocaleString('en-US') : x >= 1 ? x.toFixed(1) : x.toFixed(2));

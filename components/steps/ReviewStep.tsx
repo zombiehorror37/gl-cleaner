@@ -41,6 +41,8 @@ export default function ReviewStep() {
   const undismiss = useStore((s) => s.undismiss);
   const clearDecisions = useStore((s) => s.clearDecisions);
   const setStep = useStore((s) => s.setStep);
+  const restored = useStore((s) => s.restored);
+  const dismissRestored = useStore((s) => s.dismissRestored);
 
   const [tab, setTab] = useState<'matches' | 'exceptions'>('matches');
   const [contact, setContact] = useState<string | null>(null);
@@ -312,6 +314,23 @@ export default function ReviewStep() {
           </Button>
         </div>
       </div>
+
+      {restored && (
+        <div role="status" className="flex flex-wrap items-center gap-3 rounded-xl border border-sky-500/30 bg-sky-500/[0.06] px-4 py-2.5 text-sm">
+          <span>
+            Picked up where you left off: <b>{restored.approved}</b> approval(s) and <b>{restored.dismissed}</b> dismissal(s) restored from {new Date(restored.savedAt).toLocaleString()}.
+            {restored.missing > 0 && ` ${restored.missing} earlier decision(s) no longer match a proposal (the settings changed what is proposed).`}
+          </span>
+          <span className="ml-auto flex gap-2">
+            <Button size="sm" variant="ghost" onClick={clearDecisions}>
+              Start fresh
+            </Button>
+            <Button size="sm" variant="ghost" onClick={dismissRestored}>
+              OK
+            </Button>
+          </span>
+        </div>
+      )}
 
       <div className={cx('grid gap-4', !single && 'lg:grid-cols-[16rem_1fr]')}>
         {/* Contacts */}

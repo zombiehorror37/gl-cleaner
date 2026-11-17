@@ -12,6 +12,8 @@ export interface ExportInput {
   rejected: RejectedRow[];
   result: CleanResult;
   approvedIds: Set<string>;
+  /** Proposals the reviewer rejected (listed as "Dismissed" in the Matches sheet). */
+  dismissedIds?: Set<string>;
   dateOrder: DateOrder;
 }
 
@@ -118,18 +120,51 @@ export async function buildWorkbook(input: ExportInput): Promise<ArrayBuffer> {
   detail.getColumn(12).numFmt = numFmt;
   styleHeader(detail, [10, ...TEMPLATE_WIDTHS, 13, 15, 10, 24, 14, 70]);
 
-  // ---- 3. Matches -----------------------------------------------------------------
+  // ---- 3. Matches: every proposal and what the reviewer decided -------------------
   const matches = wb.addWorksheet('Matches');
-  matches.addRow(['Match ID', 'Contact Code', 'Contact Name', 'Type', 'Confidence', 'Lines', 'Source Rows', 'Transaction Ids', 'Lines Net', 'Kept Open (residual)', 'Why']);
+  matches.addRow([
+    'Match ID',
+    'Decision',
+    'Contact Code',
+    'Contact Name',
+    'Type',
+    'Confidence',
+    'How the confidence was scored',
+    'Lines',
+    'Source Rows',
+    'Transaction Ids',
+    'Lines Net',
+    'Kept Open (residual)',
+    'Why',
+  ]);
   const rowById = new Map(rows.map((r) => [r.id, r]));
-  for (const g of outcome.approved) {
+  const dismissedIds = input.dismissedIds ?? new Set<string>();
+  const locked = new Map<number, string>();
+  for (const g of outcome.approved) for (const id of g.memberIds) locked.set(id, g.id);
+  for (const g of result.groups) {
     const ms = g.memberIds.map((id) => rowById.get(id)!);
-    matches.addRow([
+    const decision = approvedIds.has(g.id)
+      ? 'Approved'
+      : dismissedIds.has(g.id)
+        ? 'Dismissed'
+        : g.memberIds.some((id) => locked.has(id))
+          ? `Not used (lines in ${g.memberIds.map((id) => locked.get(id)).find(Boolean)})`
+          : 'Not reviewed';
+    const sc = g.score;
+    const explained = [
+      `${sc.basis}: ${sc.base}`,
+      ...sc.parts.map((x) => `+${x.points} ${x.label}`),
+      ...(sc.cap !== null ? [`capped at ${sc.cap}`] : []),
+      `= ${g.confidence}`,
+    ].join('; ');
+    const row = matches.addRow([
       g.id,
+      decision,
       ms[0].contactCode,
       ms[0].contactName,
       KIND_LABEL[g.kind],
       `${g.tier} (${g.confidence})`,
+      explained,
       ms.length,
       ms.map((m) => m.sourceRow).join(', '),
       ms.map((m) => m.transactionId).join(', '),
@@ -137,9 +172,10 @@ export async function buildWorkbook(input: ExportInput): Promise<ArrayBuffer> {
       g.residual ? `${centsToNumber(g.residual, p)} on ${rowById.get(g.residualFromId!)!.transactionId}` : '',
       g.reasons.join('; '),
     ]);
+    if (decision !== 'Approved') row.font = CLEARED_FONT;
   }
-  matches.getColumn(9).numFmt = numFmt;
-  styleHeader(matches, [10, 14, 26, 24, 13, 7, 20, 34, 14, 26, 80]);
+  matches.getColumn(11).numFmt = numFmt;
+  styleHeader(matches, [10, 22, 14, 26, 18, 13, 60, 7, 20, 34, 14, 26, 80]);
 
   // ---- 4. Exceptions ------------------------------------------------------------------
   const ex = wb.addWorksheet('Exceptions');

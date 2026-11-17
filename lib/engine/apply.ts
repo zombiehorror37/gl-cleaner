@@ -26,6 +26,15 @@ export interface Outcome {
   };
   /** Integrity violations. Export refuses to run when this is non-empty. */
   errors: string[];
+  /** The same checks as pass/fail flags, for display. */
+  checks: {
+    /** No line sits in two approved matches. */
+    noOverlap: boolean;
+    /** Every approved match nets to zero, or its remainder is a genuine part of one member line. */
+    residualsValid: boolean;
+    /** Open items total equals the original total. */
+    balanced: boolean;
+  };
 }
 
 const RESIDUAL_KINDS = new Set(['partial', 'near', 'fifo']);
@@ -38,6 +47,8 @@ const RESIDUAL_KINDS = new Set(['partial', 'near', 'fifo']);
  */
 export function applyDecisions(rows: LedgerRow[], groups: MatchGroup[], approvedIds: Set<string>, precision = 2): Outcome {
   const errors: string[] = [];
+  let overlap = false;
+  let badResidual = false;
   const byId = new Map(rows.map((r) => [r.id, r]));
   const approved = groups.filter((g) => approvedIds.has(g.id));
   const clearedBy = new Map<number, string>();
@@ -53,18 +64,27 @@ export function applyDecisions(rows: LedgerRow[], groups: MatchGroup[], approved
       }
       if (r.contactKey !== g.contactKey) errors.push(`${g.id}: line on row ${r.sourceRow} belongs to another contact.`);
       const prev = clearedBy.get(id);
-      if (prev) errors.push(`Row ${r.sourceRow} is in two approved matches (${prev} and ${g.id}).`);
+      if (prev) {
+        overlap = true;
+        errors.push(`Row ${r.sourceRow} is in two approved matches (${prev} and ${g.id}).`);
+      }
       else clearedBy.set(id, g.id);
       sum += r.net;
     }
+    if (sum !== g.residual) badResidual = true;
     if (sum !== g.residual) errors.push(`${g.id}: lines sum to ${formatCents(sum, precision)} but the match records ${formatCents(g.residual, precision)}.`);
     if (g.residual !== 0) {
-      if (!RESIDUAL_KINDS.has(g.kind)) errors.push(`${g.id}: a ${g.kind} match must net to zero.`);
+      if (!RESIDUAL_KINDS.has(g.kind)) {
+        badResidual = true;
+        errors.push(`${g.id}: a ${g.kind} match must net to zero.`);
+      }
       if (g.residualFromId === null || !g.memberIds.includes(g.residualFromId)) {
+        badResidual = true;
         errors.push(`${g.id}: residual has no source line.`);
       } else {
         const from = byId.get(g.residualFromId)!;
         if (Math.sign(from.net) !== Math.sign(g.residual) || Math.abs(g.residual) >= Math.abs(from.net)) {
+          badResidual = true;
           errors.push(`${g.id}: residual ${formatCents(g.residual, precision)} is not a part of row ${from.sourceRow} (${formatCents(from.net, precision)}).`);
         }
         residualAt.set(g.residualFromId, { group: g, amount: g.residual });
@@ -117,6 +137,7 @@ export function applyDecisions(rows: LedgerRow[], groups: MatchGroup[], approved
       openNet,
     },
     errors,
+    checks: { noOverlap: !overlap, residualsValid: !badResidual && clearedNet === residualTotal, balanced: openNet === originalNet },
   };
 }
 

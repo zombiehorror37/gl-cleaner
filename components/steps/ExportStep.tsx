@@ -9,7 +9,7 @@ import { Button, Card, cx, downloadBuffer } from '@/components/ui';
 const SHEETS: [string, string][] = [
   ['Open Items', 'The cleaned ledger in the forced template: untouched open lines plus residual lines for part-settled documents. Ready to re-import.'],
   ['Detail', 'Every valid line in source order with its status (Open / Cleared / Part-settled), match id, match type, confidence and the reasons.'],
-  ['Matches', 'One row per approved match: lines, transaction ids, what was kept open, and why.'],
+  ['Matches', 'Every proposal and your decision (approved, dismissed, not reviewed), with the lines, what was kept open, why, and how its confidence was scored.'],
   ['Exceptions', 'Duplicates, wrong-contact postings, sign problems, unapplied cash, ambiguous matches.'],
   ['Rejected Rows', 'Rows excluded from cleaning (missing mandatory fields, unreadable Net, totals, headings) with the reason.'],
   ['Contact Summary', 'Per contact: original balance, cleared / open lines, open balance, with live Excel checks.'],
@@ -22,6 +22,7 @@ export default function ExportStep() {
   const validation = useStore((s) => s.validation)!;
   const result = useStore((s) => s.result)!;
   const approved = useStore((s) => s.approved);
+  const dismissed = useStore((s) => s.dismissed);
   const setStep = useStore((s) => s.setStep);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -44,6 +45,7 @@ export default function ExportStep() {
         rejected: validation.rejected,
         result,
         approvedIds: approved,
+        dismissedIds: dismissed,
         dateOrder: validation.dateOrderUsed,
       });
       downloadBuffer(buf, `${workbook.fileName.replace(/\.[^.]+$/, '')}-cleaned.xlsx`);
@@ -56,9 +58,9 @@ export default function ExportStep() {
   };
 
   const checks: [string, boolean, string][] = [
-    ['No line is in two approved matches', !outcome.errors.some((e) => e.includes('two approved')), ''],
-    ['Every match nets to zero or keeps its remainder open', !outcome.errors.some((e) => e.includes('sum') || e.includes('residual')), `${t.residualLines} residual line(s)`],
-    ['Open balance equals the original balance', t.openNet === t.originalNet, `${fmt(t.openNet)} = ${fmt(t.originalNet)}`],
+    ['No line is in two approved matches', outcome.checks.noOverlap, ''],
+    ['Every match nets to zero or keeps its remainder open', outcome.checks.residualsValid, `${t.residualLines} residual line(s)`],
+    ['Open balance equals the original balance', outcome.checks.balanced, `${fmt(t.openNet)} = ${fmt(t.originalNet)}`],
   ];
 
   return (
