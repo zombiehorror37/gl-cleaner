@@ -75,6 +75,17 @@ const ID_PREFIX: [DocClass, RegExp][] = [
   ['journal', /^(jv|je|jnl)[-_/ .#]?\d/i],
 ];
 
+/**
+ * Standard SAP FI/MM document type codes (the 2-letter "Document Type" in SAP
+ * line-item exports). Only applied when the cell is exactly the code.
+ */
+const SAP_CODES: Record<string, DocClass> = {
+  DR: 'invoice', RV: 'invoice', KR: 'invoice', RE: 'invoice', RN: 'invoice',
+  DG: 'credit_note', KG: 'credit_note',
+  DZ: 'payment', KZ: 'payment', ZP: 'payment', DA: 'payment', KA: 'payment',
+  SA: 'journal', AB: 'journal', SB: 'journal', SK: 'journal', SU: 'journal', AF: 'journal', AA: 'journal',
+};
+
 const match = (text: string | null, table: [DocClass, RegExp][]): DocClass | null => {
   if (!text) return null;
   for (const [cls, re] of table) if (re.test(text)) return cls;
@@ -86,7 +97,9 @@ export function classifyDocument(
   transactionId: string,
   description: string | null,
 ): DocClass {
+  const code = documentType?.trim().toUpperCase();
   return (
+    (code && code.length <= 3 ? SAP_CODES[code] : undefined) ??
     match(documentType, PATTERNS) ??
     match(transactionId, ID_PREFIX) ??
     match(description, PATTERNS) ??

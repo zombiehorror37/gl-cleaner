@@ -61,6 +61,16 @@ describe('sample ledger end-to-end', async () => {
     expect(ex).toEqual(expect.arrayContaining(['duplicate', 'misposting', 'unapplied', 'opposite-balance', 'ambiguous']));
   });
 
+  it('every confidence score is explained exactly by its breakdown', () => {
+    for (const g of result.groups) {
+      const raw = g.score.base + g.score.parts.reduce((a, p) => a + p.points, 0);
+      const expected = Math.max(0, Math.min(g.score.cap ?? 100, raw));
+      expect(g.confidence, g.id).toBe(expected);
+      expect(g.score.basis.length, g.id).toBeGreaterThan(10);
+      if (g.score.cap !== null) expect(raw).toBeGreaterThan(g.score.cap);
+    }
+  });
+
   it('exports a consistent workbook whose first sheet is the forced template', async () => {
     const approved = new Set(result.groups.filter((g) => g.suggested).map((g) => g.id));
     const near = result.groups.find((g) => g.kind === 'near')!;

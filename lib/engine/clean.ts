@@ -1,5 +1,5 @@
 import { DOC_CLASS_LABEL, EXPECTED_SIDE, type Side } from '../parse/doc-class';
-import { digitCore, formatCents, nameKey, textTokens, txnKey } from '../parse/values';
+import { descriptionKeys, digitCore, formatCents, isMangledText, nameKey, textTokens, txnKey } from '../parse/values';
 import { byDate, clamp, corroborate, describeDifference, sideOf, tierOf } from './evidence';
 import { findSubsets } from './subset';
 import type {
@@ -21,6 +21,20 @@ const SHARED_REF_LIMIT = 8;
 const MAX_ALTERNATIVES = 4;
 
 type DraftGroup = Omit<MatchGroup, 'id'>;
+
+/** Default explanation of each kind's starting score. */
+const BASIS: Record<GroupKind, string> = {
+  zero: 'The line is zero: nothing to settle',
+  'same-id': 'Lines share one Transaction Id and net to zero',
+  linked: 'Lines are linked by document references',
+  partial: 'Lines are linked, but do not fully net',
+  pair: 'Exact equal-and-opposite amounts',
+  'fifo-pair': 'Identical amounts on both sides, paired oldest-first: which pair is assumed',
+  combo: 'Several lines add up exactly to one line',
+  nil: 'Everything left nets to exactly zero',
+  near: 'Amounts are close but not equal',
+  fifo: 'Allocation is assumed (balance-forward), not evidenced',
+};
 
 /**
  * Clean a contact ledger. Every contact is worked independently, in the
@@ -50,6 +64,11 @@ export function cleanLedger(
   const side = (r: LedgerRow): Side => sideOf(r, sign);
   const fmt = (c: number) => formatCents(c, settings.precision);
   const label = (r: LedgerRow) => `${r.transactionId} (${fmt(r.net)})`;
+  const gl = settings.glAccount;
+  /** Vocabulary: customer/supplier ledgers speak of charges and settlements, GL accounts of debits and credits. */
+  const W = gl
+    ? { charge: 'debit', charges: 'debits', settlement: 'credit', settlements: 'credits' }
+    : { charge: 'charge', charges: 'charges', settlement: 'settlement', settlements: 'settlements' };
 
   const drafts: DraftGroup[] = [];
   const exceptions: Omit<LedgerException, 'id'>[] = [];
@@ -122,9 +141,17 @@ export function cleanLedger(
       members: LedgerRow[],
       base: number,
       reasons: string[],
-      opts: { suggested: boolean; individualOnly?: boolean; altKey?: string | null; residualFromId?: number | null; maxConfidence?: number },
+      opts: {
+        suggested: boolean;
+        individualOnly?: boolean;
+        altKey?: string | null;
+        residualFromId?: number | null;
+        maxConfidence?: number;
+        /** Why the starting score is what it is (shown when hovering the score). */
+        basis?: string;
+      },
     ): DraftGroup => {
-      const ev = kind === 'zero' ? null : corroborate(members, sign);
+      const ev = kind === 'zero' ? null : corroborate(members, sign, gl);
       const residual = members.reduce((s, m) => s + m.net, 0);
       let residualFromId: number | null = null;
       if (residual !== 0) {
@@ -134,7 +161,9 @@ export function cleanLedger(
             .filter((m) => Math.sign(m.net) === Math.sign(residual))
             .sort((a, b) => Math.abs(b.net) - Math.abs(a.net) || byDate(a, b))[0].id;
       }
-      const confidence = clamp(base + (ev?.points ?? 0), 0, opts.maxConfidence ?? 100);
+      const cap = opts.maxConfidence ?? 100;
+      const raw = base + (ev?.points ?? 0);
+      const confidence = clamp(raw, 0, cap);
       const g: DraftGroup = {
         contactKey: key,
         kind,
@@ -143,6 +172,7 @@ export function cleanLedger(
         residualFromId,
         confidence,
         tier: tierOf(confidence),
+        score: { basis: opts.basis ?? BASIS[kind], base, parts: ev?.parts ?? [], cap: raw > cap ? cap : null },
         reasons: [...reasons, ...(ev?.reasons ?? [])],
         suggested: opts.suggested,
         individualOnly: opts.individualOnly ?? false,
@@ -200,7 +230,7 @@ export function cleanLedger(
       const settles = bucket.filter((r) => side(r) === 'settlement').sort(byDate);
       for (const c of charges) {
         const s = settles.find((x) => free.has(x.id) && x.net === -c.net);
-        if (s && free.has(c.id)) emit('same-id', [c, s], 85, [`equal and opposite under the same Transaction Id "${id}"`], { suggested: true });
+        if (s && free.has(c.id)) emit('same-id', [c, s], 85, [`equal and opposite under the same Transaction Id "${id}"`], { suggested: true, basis: 'Equal and opposite lines under the same Transaction Id' });
       }
       const rest = bucket.filter((r) => free.has(r.id));
       if (rest.length >= 2 && bothSides(rest)) {
@@ -233,8 +263,9 @@ export function cleanLedger(
         return x;
       };
       const linkReason = new Map<number, Set<string>>();
+      /** 2 = cites the Transaction Id, 1 = number / shared Reference, 0.5 = description keys only. */
       const strength = new Map<number, number>();
-      const link = (a: LedgerRow, b: LedgerRow, why: string, strong: boolean) => {
+      const link = (a: LedgerRow, b: LedgerRow, why: string, level: 2 | 1 | 0.5) => {
         const ra = find(a.id);
         const rb = find(b.id);
         if (ra !== rb) parent.set(ra, rb);
@@ -242,7 +273,7 @@ export function cleanLedger(
           let s = linkReason.get(x);
           if (!s) linkReason.set(x, (s = new Set()));
           s.add(why);
-          strength.set(x, Math.max(strength.get(x) ?? 0, strong ? 2 : 1));
+          strength.set(x, Math.max(strength.get(x) ?? 0, level));
         }
       };
 
@@ -255,7 +286,7 @@ export function cleanLedger(
         for (const t of tokens) {
           for (const o of byKey.get(t) ?? []) {
             if (o.id !== r.id && Math.sign(o.net) !== Math.sign(r.net)) {
-              link(r, o, `${r.transactionId} cites ${o.transactionId}`, true);
+              link(r, o, `${r.transactionId} cites ${o.transactionId}`, 2);
               cited.add(o.id);
             }
           }
@@ -269,7 +300,7 @@ export function cleanLedger(
             if (k === r.txnKey) continue;
             for (const o of byKey.get(k) ?? []) {
               if (o.id !== r.id && !cited.has(o.id) && Math.sign(o.net) !== Math.sign(r.net)) {
-                link(r, o, `${r.transactionId} mentions number ${core} (${o.transactionId})`, false);
+                link(r, o, `${r.transactionId} mentions number ${core} (${o.transactionId})`, 1);
               }
             }
           }
@@ -286,7 +317,24 @@ export function cleanLedger(
       }
       for (const [, l] of byRef) {
         if (l.length < 2 || l.length > SHARED_REF_LIMIT || !bothSides(l)) continue;
-        for (let i = 1; i < l.length; i++) link(l[0], l[i], `same Reference "${l[0].reference}"`, false);
+        for (let i = 1; i < l.length; i++) link(l[0], l[i], `same Reference "${l[0].reference}"`, 1);
+      }
+
+      // Lines whose descriptions carry the same identifier keys (e.g. meter E7 + period 01/2025):
+      // an accrual and its reversal, a recurring charge and its true-up.
+      const byDescKey = new Map<string, LedgerRow[]>();
+      for (const r of fr) {
+        const keys = descriptionKeys(r.description);
+        if (keys.length < 2 || keys.every((k) => k.startsWith('P'))) continue;
+        const sig = keys.join(' · ');
+        let l = byDescKey.get(sig);
+        if (!l) byDescKey.set(sig, (l = []));
+        l.push(r);
+      }
+      for (const [sig, l] of byDescKey) {
+        if (l.length < 2 || l.length > 6 || !bothSides(l)) continue;
+        const why = `same description keys (${sig.replace(/P(\d{4})-(\d{2})/g, '$2/$1')})`;
+        for (let i = 1; i < l.length; i++) link(l[0], l[i], why, 0.5);
       }
 
       const comps = new Map<number, LedgerRow[]>();
@@ -302,14 +350,22 @@ export function cleanLedger(
         if (comp.length < 2 || !bothSides(comp) || comp.some((r) => !free.has(r.id))) continue;
         const reasons = [...new Set(comp.flatMap((r) => [...(linkReason.get(r.id) ?? [])]))].slice(0, 4);
         const strong = comp.every((r) => (strength.get(r.id) ?? 0) === 2);
+        const descOnly = comp.every((r) => (strength.get(r.id) ?? 0) === 0.5);
         const total = comp.reduce((s, r) => s + r.net, 0);
         if (total === 0) {
-          emit('linked', comp, strong ? 85 : 72, reasons, { suggested: true });
+          emit('linked', comp, strong ? 85 : descOnly ? 70 : 72, reasons, {
+            suggested: true,
+            basis: strong
+              ? 'A line cites the other line’s Transaction Id, and they net to zero'
+              : descOnly
+                ? 'Descriptions carry the same identifiers (e.g. meter + period), and they net to zero'
+                : 'Linked by a number in the text or a shared Reference, and they net to zero',
+          });
           continue;
         }
         // Remainder settled by an unlinked line (e.g. second instalment without a reference).
         const extSide = Math.sign(-total);
-        const pool = freeRows().filter((r) => !comp.includes(r) && !held.has(r.id) && Math.sign(r.net) === extSide);
+        const pool = (descOnly ? [] : freeRows()).filter((r) => !comp.includes(r) && !held.has(r.id) && Math.sign(r.net) === extSide);
         if (pool.length) {
           const res = findSubsets(
             pool.map((r) => ({ id: r.id, value: Math.abs(r.net) })),
@@ -323,6 +379,7 @@ export function cleanLedger(
             emit('linked', [...comp, ...extra], strong ? 70 : 60, [...reasons, `remaining ${fmt(Math.abs(total))} settled by ${extra.map(label).join(' + ')} (amount match)`], {
               suggested: true,
               maxConfidence: 90,
+              basis: 'Linked lines, with the remainder settled by an unreferenced line of the exact amount',
             });
             continue;
           }
@@ -331,13 +388,13 @@ export function cleanLedger(
         if (comp.length <= COMPONENT_ENUM_LIMIT) {
           const best = largestZeroSubset(comp, side);
           if (best && best.length >= 2) {
-            emit('linked', best, strong ? 80 : 68, reasons, { suggested: true });
+            emit('linked', best, strong ? 80 : 68, reasons, { suggested: true, basis: 'Part of a linked set that nets to zero (another linked line did not fit)' });
             const rest = comp.filter((r) => free.has(r.id));
-            if (rest.length >= 2 && bothSides(rest)) buildPartial(rest, reasons, strong ? 68 : 58);
+            if (rest.length >= 2 && bothSides(rest)) buildPartial(rest, reasons, strong ? 68 : 58, !descOnly);
             continue;
           }
         }
-        buildPartial(comp, reasons, strong ? 70 : 60);
+        buildPartial(comp, reasons, strong ? 70 : descOnly ? 45 : 60, !descOnly);
       }
     }
 
@@ -346,7 +403,7 @@ export function cleanLedger(
      * not touched at all (newest first) are dropped back to open; the residual
      * is carried by the one document that is genuinely part-settled (FIFO).
      */
-    function buildPartial(members: LedgerRow[], reasons: string[], base: number) {
+    function buildPartial(members: LedgerRow[], reasons: string[], base: number, suggested = true) {
       let set = [...members];
       let residual = set.reduce((s, r) => s + r.net, 0);
       const rSign = Math.sign(residual);
@@ -357,15 +414,16 @@ export function cleanLedger(
         }
       }
       if (residual === 0) {
-        if (bothSides(set)) emit('linked', set, base + 5, reasons, { suggested: true });
+        if (bothSides(set)) emit('linked', set, base + 5, reasons, { suggested: true, basis: 'Linked lines that net to zero once untouched lines are left open' });
         return;
       }
       if (!bothSides(set)) return;
       const from = set.filter((x) => Math.sign(x.net) === Math.sign(residual)).sort(byDate).reverse()[0];
       const rSide = side(from);
       const diff = describeDifference(residual, Math.abs(from.net), rSide, settings);
-      emit('partial', set, base, [...reasons, diff.label, `${from.transactionId} stays open for ${fmt(residual)}`], {
-        suggested: true,
+      emit('partial', set, base, [...reasons, diff.label, `${from.transactionId} stays open for ${fmt(residual)}`, ...(suggested ? [] : ['linked by description only: amounts differ, review before approving'])], {
+        suggested,
+        basis: suggested ? 'Linked lines that do not fully net: the difference stays open' : 'Linked only by description keys, and the amounts differ',
         residualFromId: from.id,
         maxConfidence: 85,
       });
@@ -384,7 +442,11 @@ export function cleanLedger(
         if (!c.length || !s.length) continue;
         // Opposite signs are guaranteed: same absolute value, different sides.
         if (c.length === 1 && s.length === 1) {
-          emit('pair', [c[0], s[0]], 62, [`the only charge and settlement of ${fmt(abs)} on this contact`], { suggested: true, maxConfidence: 92 });
+          emit('pair', [c[0], s[0]], 62, [`the only ${W.charge} and ${W.settlement} of ${fmt(abs)} on this ${gl ? 'account' : 'contact'}`], {
+            suggested: true,
+            maxConfidence: 92,
+            basis: `The only ${W.charge} and ${W.settlement} of this exact amount (no document link)`,
+          });
           continue;
         }
         // Several identical amounts. Documented pairs first, then oldest-to-oldest.
@@ -393,21 +455,25 @@ export function cleanLedger(
         const scored: { c: LedgerRow; s: LedgerRow; pts: number }[] = [];
         for (const x of cs) {
           for (const y of ss) {
-            const ev = corroborate([x, y], sign);
+            const ev = corroborate([x, y], sign, gl);
             if (ev.documentary > 0) scored.push({ c: x, s: y, pts: ev.points });
           }
         }
         scored.sort((a, b) => b.pts - a.pts || byDate(a.c, b.c));
         for (const p of scored) {
           if (free.has(p.c.id) && free.has(p.s.id)) {
-            emit('pair', [p.c, p.s], 55, [`${c.length} charges and ${s.length} settlements of ${fmt(abs)}; this pair is documented`], { suggested: true, maxConfidence: 85 });
+            emit('pair', [p.c, p.s], 55, [`${c.length} ${W.charges} and ${s.length} ${W.settlements} of ${fmt(abs)}; this pair is documented`], {
+              suggested: true,
+              maxConfidence: 85,
+              basis: 'One of several identical amounts, chosen because this pair is documented',
+            });
           }
         }
         const rc = cs.filter((x) => free.has(x.id));
         const rs = ss.filter((x) => free.has(x.id));
         const n = Math.min(rc.length, rs.length);
         for (let i = 0; i < n; i++) {
-          emit('fifo-pair', [rc[i], rs[i]], 50, [`${c.length} charges and ${s.length} settlements of ${fmt(abs)}; paired oldest-first (FIFO)`], {
+          emit('fifo-pair', [rc[i], rs[i]], 50, [`${c.length} ${W.charges} and ${s.length} ${W.settlements} of ${fmt(abs)}; paired oldest-first (FIFO)`], {
             suggested: true,
             maxConfidence: 70,
           });
@@ -444,12 +510,16 @@ export function cleanLedger(
         const ranked = combos
           .map((ids) => {
             const ms = ids.map((id) => byId.get(id)!);
-            const ev = corroborate([t, ...ms], sign);
+            const ev = corroborate([t, ...ms], sign, gl);
             return { ms, ev, pts: ev.points - (ev.prepayment ? 4 : 0) - ms.length };
           })
           .sort((a, b) => b.pts - a.pts || a.ms.length - b.ms.length);
         const what = (n: number) =>
-          tSide === 'settlement' ? `one settlement covers ${n} charges` : `one charge settled in ${n} instalments`;
+          gl
+            ? `one ${tSide === 'charge' ? 'debit' : 'credit'} offset by ${n} ${tSide === 'charge' ? 'credits' : 'debits'}`
+            : tSide === 'settlement'
+              ? `one settlement covers ${n} charges`
+              : `one charge settled in ${n} instalments`;
 
         const unique = res.totalFound === 1 && res.exhausted;
         const clearWinner = ranked.length > 1 && ranked[0].ev.documentary > 0 && ranked[0].pts - ranked[1].pts >= 10;
@@ -458,6 +528,7 @@ export function cleanLedger(
           emit('combo', [t, ...best.ms], unique ? 58 : 50, [what(best.ms.length), unique ? 'the only combination that clears this amount' : `best-documented of ${res.totalFound} combinations`], {
             suggested: true,
             maxConfidence: 85,
+            basis: unique ? 'The only combination of lines that adds up to this amount' : `The best-documented of ${res.totalFound} combinations that add up to this amount`,
           });
           continue;
         }
@@ -467,6 +538,7 @@ export function cleanLedger(
             suggested: false,
             altKey,
             maxConfidence: 45,
+            basis: `One of ${res.exhausted ? res.totalFound : `${res.totalFound}+`} combinations that add up to this amount: nothing says which is right`,
           });
         }
         exceptions.push({
@@ -492,7 +564,7 @@ export function cleanLedger(
     {
       const fr = amountRows();
       if (fr.length >= 2 && bothSides(fr) && sum(fr.map((r) => r.id)) === 0) {
-        emit('nil', fr, 82, [`the contact's remaining ${fr.length} lines net to exactly zero; nothing is outstanding`], { suggested: true });
+        emit('nil', fr, 82, [`the ${gl ? 'account' : 'contact'}'s remaining ${fr.length} lines net to exactly zero; nothing is outstanding`], { suggested: true });
       }
     }
 
@@ -507,6 +579,8 @@ export function cleanLedger(
           for (const s of settles) {
             const d = c.net + s.net;
             if (d === 0) continue;
+            // A "difference" must be small next to the amounts themselves (0.10 vs 0.50 is not a near miss).
+            if (Math.abs(d) * 10 > Math.max(Math.abs(c.net), Math.abs(s.net))) continue;
             const rSide: Side = Math.sign(d) === sign ? 'charge' : 'settlement';
             const diff = describeDifference(d, Math.abs(c.net), rSide, settings);
             if (!diff.withinTolerance) continue;
@@ -534,7 +608,7 @@ export function cleanLedger(
     }
 
     // ---- 6. balance-forward FIFO ---------------------------------------------------
-    if (settings.balanceForward) {
+    if (settings.balanceForward && !gl) {
       const fr = amountRows();
       const net = fr.reduce((s, r) => s + r.net, 0);
       if (fr.length >= 2 && bothSides(fr) && net !== 0) {
@@ -697,8 +771,54 @@ export function cleanLedger(
     }
   }
 
+  // ---- counterparts outside the file's period ------------------------------------------
+  const months = rows.map((r) => r.effectiveDate ?? r.dueDate).filter((d): d is string => !!d).map((d) => d.slice(0, 7)).sort();
+  if (months.length) {
+    const first = months[0];
+    const last = months[months.length - 1];
+    for (const c of contacts) {
+      const before: LedgerRow[] = [];
+      const after: LedgerRow[] = [];
+      for (const id of freeByContact.get(c.key)!) {
+        const r = byId.get(id)!;
+        const periods = descriptionKeys(r.description).filter((k) => k.startsWith('P')).map((k) => k.slice(1));
+        if (periods.length !== 1) continue;
+        if (periods[0] < first) before.push(r);
+        else if (periods[0] === last && /acc|accru|استحقاق|مستحق/i.test(r.description ?? '')) after.push(r);
+      }
+      if (before.length) {
+        exceptions.push({
+          kind: 'other-period',
+          severity: 'info',
+          contactKey: c.key,
+          rowIds: before.map((r) => r.id),
+          message: `${before.length} open line(s) refer to a period before this file starts (${first}): ${before.slice(0, 4).map((r) => `"${r.description}"`).join(', ')}${before.length > 4 ? '…' : ''}. Their counterpart (e.g. the original accrual) is probably in the previous period's ledger.`,
+        });
+      }
+      if (after.length) {
+        exceptions.push({
+          kind: 'other-period',
+          severity: 'info',
+          contactKey: c.key,
+          rowIds: after.map((r) => r.id),
+          message: `${after.length} open accrual line(s) for the file's last period (${last}): ${after.slice(0, 4).map((r) => `"${r.description}"`).join(', ')}${after.length > 4 ? '…' : ''}. Their reversal is probably posted after this file ends.`,
+        });
+      }
+    }
+  }
+  const mangled = rows.filter((r) => isMangledText(r.description) || isMangledText(r.reference));
+  if (mangled.length) {
+    exceptions.push({
+      kind: 'lost-text',
+      severity: 'warning',
+      contactKey: null,
+      rowIds: mangled.map((r) => r.id),
+      message: `${mangled.length} line(s) have a Description or Reference made of "#" characters (e.g. "${(isMangledText(mangled[0].description) ? mangled[0].description : mangled[0].reference) ?? ''}"). The export replaced non-Latin (Arabic) text with "#", so these lines could not be matched on their wording. Re-export as .xlsx directly (not through a text/code-page step) to keep it.`,
+    });
+  }
+
   // ---- unapplied / wrong-side balances (after suggested matches) ---------------------
-  for (const c of contacts) {
+  for (const c of gl ? [] : contacts) {
     const free = [...freeByContact.get(c.key)!].map((id) => byId.get(id)!);
     const open = free.filter((r) => side(r) === 'settlement');
     if (open.length) {

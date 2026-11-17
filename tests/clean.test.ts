@@ -311,3 +311,53 @@ describe('apply invariants', () => {
     ]);
   });
 });
+
+describe('GL accounts (accruals, reversals, SAP exports)', () => {
+  const gl = { glAccount: true } as const;
+
+  it('links an accrual to its reversal by description keys (meter + period)', () => {
+    const { suggested, res } = run(
+      [
+        ['0052701001', '0500003782', 'AB', '2025-01-31', null, 'ACC-1/2025E06-ELEC', 2418999.8],
+        ['0052701001', '0500003783', 'AB', '2025-01-31', null, 'ACC-1/2025E07-ELEC', 3187883.53],
+        ['0052701001', '0500004314', 'AB', '2025-02-24', null, 'R/ACR E06 1/25', -2418999.8],
+        ['0052701001', '0500004305', 'AB', '2025-02-24', null, 'R/ACR E7 1/25', -3360780.53],
+      ],
+      gl,
+    );
+    expect(suggested).toHaveLength(1);
+    expect(suggested[0]).toMatchObject({ kind: 'linked' });
+    expect(suggested[0].reasons[0]).toMatch(/same description keys \(E6 · 01\/2025\)/);
+    const partial = res.groups.find((g) => g.kind === 'partial')!;
+    expect(partial.suggested).toBe(false);
+    expect(partial.reasons.join(' ')).toMatch(/credit exceeds the debit by 172,897\.00/);
+  });
+
+  it('no balance-forward, no "unapplied cash" wording, no tiny near misses', () => {
+    const { res } = run(
+      [
+        ['GL1', 'D1', 'AB', '2025-03-09', null, 'adj', -0.1],
+        ['GL1', 'D2', 'AB', '2025-07-29', null, 'ADJ', 0.5],
+        ['GL1', 'D3', 'AB', '2025-01-05', null, null, 3077537.17],
+        ['GL1', 'D4', 'AB', '2025-01-19', null, 'R/ACR E7 12/24', -3077605.07],
+      ],
+      gl,
+    );
+    expect(res.groups.map((g) => g.kind)).toEqual([]);
+    const kinds = res.exceptions.map((e) => e.kind);
+    expect(kinds).not.toContain('unapplied');
+    expect(kinds).toContain('other-period');
+  });
+
+  it('flags descriptions whose Arabic text was lost in the export', () => {
+    const { res } = run([['GL1', 'D1', 'AB', '2025-03-09', null, '##### #### ##### E08', -0.1]], gl);
+    expect(res.exceptions.find((e) => e.kind === 'lost-text')?.message).toMatch(/replaced non-Latin \(Arabic\) text/);
+  });
+
+  it('understands SAP document type codes', async () => {
+    const { classifyDocument } = await import('../lib/parse/doc-class');
+    expect(['DR', 'KR', 'DZ', 'KZ', 'DG', 'SA', 'AB'].map((c) => classifyDocument(c, '0100000001', null))).toEqual([
+      'invoice', 'invoice', 'payment', 'payment', 'credit_note', 'journal', 'journal',
+    ]);
+  });
+});

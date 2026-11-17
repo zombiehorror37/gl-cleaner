@@ -1,8 +1,8 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useStore } from '@/lib/store';
 import { cleanInBackground } from '@/lib/engine/run-async';
-import { ledgerHint } from '@/lib/engine/ledger-hint';
+import { ledgerHint, ledgerKindOf, settingsForKind, type LedgerKind } from '@/lib/engine/ledger-hint';
 import { buildTemplateWorkbook } from '@/lib/export';
 import { formatCents, parseAmount } from '@/lib/parse/values';
 import { TEMPLATE_HEADERS } from '@/lib/template';
@@ -32,8 +32,9 @@ export default function CheckStep() {
   const hint = useMemo(() => ledgerHint(rows), [rows]);
   // Follow the data's suggestion until the user picks a side themselves.
   useEffect(() => {
-    if (!ledgerChosen && hint.suggested && hint.suggested !== settings.invoiceSign) setSettings({ invoiceSign: hint.suggested });
-  }, [hint.suggested, ledgerChosen, settings.invoiceSign, setSettings]);
+    if (!ledgerChosen && hint.suggested && hint.suggested !== ledgerKindOf(settings)) setSettings(settingsForKind(hint.suggested));
+  }, [hint.suggested, ledgerChosen, settings, setSettings]);
+  const kind = ledgerKindOf(settings);
 
   if (!validation) return null;
   const p = vopts.precision;
@@ -142,36 +143,36 @@ export default function CheckStep() {
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="space-y-4 p-5">
           <h3 className="font-semibold">Ledger</h3>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {([1, -1] as const).map((sign) => (
+          <div className="grid gap-2 sm:grid-cols-3">
+            {LEDGERS.map((l) => (
               <button
-                key={sign}
-                onClick={() => setSettings({ invoiceSign: sign }, true)}
+                key={l.kind}
+                onClick={() => setSettings(settingsForKind(l.kind), true)}
                 className={cx(
                   'rounded-lg border p-3 text-left transition',
-                  settings.invoiceSign === sign ? 'border-indigo-500 bg-indigo-500/5 ring-1 ring-indigo-500' : 'border-black/15 hover:bg-black/5 dark:border-white/20 dark:hover:bg-white/5',
+                  kind === l.kind ? 'border-indigo-500 bg-indigo-500/5 ring-1 ring-indigo-500' : 'border-black/15 hover:bg-black/5 dark:border-white/20 dark:hover:bg-white/5',
                 )}
               >
-                <div className="font-medium">{sign === 1 ? 'Receivables (customers)' : 'Payables (suppliers)'}</div>
-                <div className="text-sm opacity-70">
-                  Invoices are <b>{sign === 1 ? 'positive (+)' : 'negative (−)'}</b>, payments and credit notes are {sign === 1 ? 'negative' : 'positive'}.
-                </div>
+                <div className="font-medium">{l.title}</div>
+                <div className="text-sm opacity-70">{l.body}</div>
               </button>
             ))}
           </div>
-          {evidence > 0 && (
-            <p className="text-xs opacity-70">
-              From the document types: {hint.invoicesPositive} invoice(s) positive, {hint.invoicesNegative} negative; {hint.settlementsNegative} payment/credit note(s) negative,{' '}
-              {hint.settlementsPositive} positive.
-              {hint.suggested && (
-                <>
-                  {' '}
-                  This looks like <b>{hint.suggested === 1 ? 'Receivables' : 'Payables'}</b>.
-                  {hint.suggested !== settings.invoiceSign && <span className="text-amber-600 dark:text-amber-400"> Your choice differs, so expect sign warnings.</span>}
-                </>
-              )}
-            </p>
-          )}
+          <p className="text-xs opacity-70">
+            {evidence > 0 && (
+              <>
+                From the document types: {hint.invoicesPositive} invoice(s) positive, {hint.invoicesNegative} negative; {hint.settlementsNegative} payment/credit note(s) negative,{' '}
+                {hint.settlementsPositive} positive{hint.journals > 0 && `; ${hint.journals} journal / accounting document(s)`}.{' '}
+              </>
+            )}
+            {evidence === 0 && hint.journals > 0 && <>{hint.journals} journal / accounting document(s), no invoices or payments recognised. </>}
+            {hint.suggested && (
+              <>
+                This looks like <b>{LEDGERS.find((l) => l.kind === hint.suggested)!.title}</b>.
+                {hint.suggested !== kind && <span className="text-amber-600 dark:text-amber-400"> Your choice differs.</span>}
+              </>
+            )}
+          </p>
 
           <h3 className="pt-2 font-semibold">Reading the file</h3>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -236,10 +237,14 @@ export default function CheckStep() {
             </Field>
           </div>
           <label className="flex items-start gap-2 text-sm">
-            <input type="checkbox" className="mt-0.5" checked={settings.balanceForward} onChange={(e) => setSettings({ balanceForward: e.target.checked })} />
+            <input type="checkbox" className="mt-0.5" disabled={kind === 'gl'} checked={settings.balanceForward && kind !== 'gl'} onChange={(e) => setSettings({ balanceForward: e.target.checked })} />
             <span>
               <b>Offer balance-forward (FIFO) allocation</b>
-              <span className="block opacity-70">For contacts kept on balance-forward: apply leftover payments to the oldest invoices. Always needs individual approval.</span>
+              <span className="block opacity-70">
+                {kind === 'gl'
+                  ? 'Not used for GL accounts.'
+                  : 'For contacts kept on balance-forward: apply leftover payments to the oldest invoices. Always needs individual approval.'}
+              </span>
             </span>
           </label>
           <details className="text-sm">
@@ -278,6 +283,36 @@ export default function CheckStep() {
     </div>
   );
 }
+
+const LEDGERS: { kind: LedgerKind; title: string; body: ReactNode }[] = [
+  {
+    kind: 'receivables',
+    title: 'Receivables (customers)',
+    body: (
+      <>
+        Invoices <b>positive (+)</b>, receipts and credit notes negative.
+      </>
+    ),
+  },
+  {
+    kind: 'payables',
+    title: 'Payables (suppliers)',
+    body: (
+      <>
+        Invoices <b>negative (−)</b>, payments and debit notes positive.
+      </>
+    ),
+  },
+  {
+    kind: 'gl',
+    title: 'GL account',
+    body: (
+      <>
+        Accruals, clearing, suspense or expense. <b>Debits +, credits −.</b> Matches postings to their reversals.
+      </>
+    ),
+  },
+];
 
 const SEV: Record<ValidationIssue['severity'], { tone: 'bad' | 'warn' | 'info'; label: string }> = {
   error: { tone: 'bad', label: 'Error' },

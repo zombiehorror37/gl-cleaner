@@ -365,3 +365,36 @@ const FILLER = new Set([
   'invoice', 'payment', 'receipt', 'credit', 'debit', 'note', 'against', 'from', 'with', 'this', 'that',
   'being', 'amount', 'paid', 'settlement', 'transfer', 'bank', 'cash', 'cheque', 'check',
 ]);
+
+const PERIOD_IN_TEXT = /(?<![\d/.])(\d{1,2})\s*[/.\-]\s*(20\d{2}|\d{2})(?![\d/.\-])/g;
+
+/**
+ * Identifier keys in a description, for linking lines that describe the same
+ * thing without citing each other's Transaction Id — e.g. an accrual
+ * "ACC-1/2025E07-ELEC" and its reversal "R/ACR E7 1/25" both reduce to
+ * {E7, P2025-01}. Periods (m/yyyy, m/yy) become P{yyyy}-{mm}; letter+number
+ * codes lose leading zeros (E07 → E7); pure numbers ≥ 3 digits are kept.
+ */
+export function descriptionKeys(text: string | null): string[] {
+  if (!text) return [];
+  let s = ARABIC_DIGITS(text).toUpperCase().replace(DATE_IN_TEXT, ' ');
+  const keys = new Set<string>();
+  s = s.replace(PERIOD_IN_TEXT, (_m, mm: string, yy: string) => {
+    const m = Number(mm);
+    const y = yy.length === 2 ? 2000 + Number(yy) : Number(yy);
+    if (m >= 1 && m <= 12) keys.add(`P${y}-${String(m).padStart(2, '0')}`);
+    return ' ';
+  });
+  // Split letter/digit runs glued by separators or each other ("2025E07" → 2025, E07).
+  for (const tok of s.split(/[^\p{L}\p{N}]+/u)) {
+    for (const part of tok.match(/\p{L}+\d+|\d+/gu) ?? []) {
+      const m = part.match(/^(\p{L}+)0*(\d+)$/u);
+      if (m) keys.add(`${m[1]}${m[2]}`);
+      else if (part.length >= 3) keys.add(part.replace(/^0+(?=\d)/, ''));
+    }
+  }
+  return [...keys].sort();
+}
+
+/** True when a text field is only '#' placeholders: the export lost non-Latin (e.g. Arabic) characters. */
+export const isMangledText = (text: string | null) => !!text && /#{3,}/.test(text) && /^[#\s\-/\d.,:()]+$/.test(text.replace(/\b[A-Z]{1,3}\d*\b/gi, ''));

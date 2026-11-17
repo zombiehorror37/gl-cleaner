@@ -24,6 +24,8 @@ const SETTLEMENT_CLASSES = new Set(['payment', 'credit_note', 'wht', 'discount',
 export interface Evidence {
   /** Bonus points to add on top of a kind's base confidence. */
   points: number;
+  /** The same points, itemised, for the score explanation. */
+  parts: { label: string; points: number }[];
   reasons: string[];
   /** Count of document-level signals (reference, wording, reversal), not just dates/types. */
   documentary: number;
@@ -37,16 +39,21 @@ export interface Evidence {
  * matching wording, a reversal note, invoice-vs-payment document types, and
  * dates in a sensible order.
  */
-export function corroborate(members: LedgerRow[], invoiceSign: 1 | -1): Evidence {
+export function corroborate(members: LedgerRow[], invoiceSign: 1 | -1, gl = false): Evidence {
   const reasons: string[] = [];
+  const parts: { label: string; points: number }[] = [];
   let points = 0;
   let documentary = 0;
+  const add = (n: number, label: string) => {
+    points += n;
+    parts.push({ label, points: n });
+  };
   const charges = members.filter((m) => sideOf(m, invoiceSign) === 'charge');
   const settlements = members.filter((m) => sideOf(m, invoiceSign) === 'settlement');
 
   const refs = members.map((m) => m.reference?.trim().toLowerCase()).filter((r): r is string => !!r);
   if (refs.length === members.length && new Set(refs).size === 1) {
-    points += 15;
+    add(15, 'All lines carry the same Reference');
     documentary++;
     reasons.push(`same Reference "${members[0].reference}"`);
   }
@@ -55,7 +62,7 @@ export function corroborate(members: LedgerRow[], invoiceSign: 1 | -1): Evidence
     const words = members.map((m) => descriptionWords(m.description));
     const shared = [...words[0]].filter((w) => words.every((s) => s.has(w)));
     if (members.length === 2 || shared.length > 0) {
-      points += 12;
+      add(12, 'Marked as a reversal (document type or wording)');
       documentary++;
       reasons.push('reversal entry');
     }
@@ -66,7 +73,7 @@ export function corroborate(members: LedgerRow[], invoiceSign: 1 | -1): Evidence
       const inter = [...cw].filter((w) => sw.has(w)).length;
       const jac = inter / (cw.size + sw.size - inter);
       if (jac >= 0.5) {
-        points += 10;
+        add(10, 'Descriptions share most of their words');
         documentary++;
         reasons.push('matching descriptions');
       }
@@ -79,7 +86,7 @@ export function corroborate(members: LedgerRow[], invoiceSign: 1 | -1): Evidence
     charges.every((m) => CHARGE_CLASSES.has(m.docClass)) &&
     settlements.every((m) => SETTLEMENT_CLASSES.has(m.docClass))
   ) {
-    points += 6;
+    add(6, 'Document types fit (invoice side vs payment / credit side)');
     reasons.push('document types fit (charge vs settlement)');
   }
 
@@ -91,14 +98,17 @@ export function corroborate(members: LedgerRow[], invoiceSign: 1 | -1): Evidence
     const firstSettle = sDates.reduce((a, b) => (a < b ? a : b));
     const gap = daysBetween(lastCharge, firstSettle);
     if (gap >= 0) {
-      points += gap <= 120 ? 5 : 2;
+      const after = gl ? 'credit dated on/after the debit' : 'settlement dated on/after the charge';
+      if (gap <= 120) add(5, `Dates in a sensible order (${after}, ${gap} day(s) apart)`);
+      else add(2, `Dates in order but far apart (${gap} days)`);
       if (gap === 0 && members.length === 2) reasons.push('same date');
     } else {
       prepayment = true;
-      reasons.push(`settlement dated ${-gap} day(s) before the charge`);
+      // On a GL account a credit before the debit (reclass first, accrual later) is normal.
+      if (!gl) reasons.push(`settlement dated ${-gap} day(s) before the charge`);
     }
   }
-  return { points, reasons, documentary, prepayment };
+  return { points, parts, reasons, documentary, prepayment };
 }
 
 /**
@@ -118,7 +128,7 @@ export function describeDifference(
   const fmt = (c: number) => formatCents(c, p);
   const slack = Math.max(1, Math.round(unit / 50)); // ±0.02 at 2 decimals
 
-  if (residualSide === 'charge' && base > 0) {
+  if (residualSide === 'charge' && base > 0 && !settings.glAccount) {
     for (const rate of settings.withholdingRates) {
       const gross = Math.round((base * rate) / 100);
       if (Math.abs(abs - gross) <= slack) {
@@ -138,6 +148,12 @@ export function describeDifference(
     }
   }
   if (abs <= unit) return { label: `rounding difference of ${fmt(abs)}`, withinTolerance: true, withholding: false };
+  if (settings.glAccount) {
+    const pctTolGl = settings.tolerancePercent > 0 ? Math.round((base * settings.tolerancePercent) / 100) : 0;
+    const within = abs <= Math.max(settings.toleranceAmount, pctTolGl);
+    const which = residualSide === 'charge' ? 'debit exceeds the credit' : 'credit exceeds the debit';
+    return { label: `${which} by ${fmt(abs)}${within ? ' (small difference)' : ''}`, withinTolerance: within, withholding: false };
+  }
   const pctTol = settings.tolerancePercent > 0 ? Math.round((base * settings.tolerancePercent) / 100) : 0;
   if (abs <= Math.max(settings.toleranceAmount, pctTol)) {
     return {

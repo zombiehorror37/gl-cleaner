@@ -12,7 +12,7 @@ export type GroupKind =
   | 'zero'
   /** Lines sharing one Transaction Id that net to zero (posting + reversal, invoice + settlement under the same id). */
   | 'same-id'
-  /** Lines linked by a Reference/Description that cites another line's Transaction Id, netting to zero. */
+  /** Lines linked by a Reference/Description citing another line's Transaction Id, or by matching description keys (meter + period), netting to zero. */
   | 'linked'
   /** Linked lines that do NOT fully net: settled part removed, remainder kept open as a residual line. */
   | 'partial'
@@ -30,19 +30,30 @@ export type GroupKind =
   | 'fifo';
 
 export const KIND_LABEL: Record<GroupKind, string> = {
-  zero: 'Zero-value line',
-  'same-id': 'Same Transaction Id',
-  linked: 'Linked by reference',
-  partial: 'Partial settlement',
-  pair: 'Exact amount pair',
-  'fifo-pair': 'Identical amounts (FIFO)',
-  combo: 'Amount combination',
-  nil: 'Contact nets to zero',
+  zero: 'Zero line',
+  'same-id': 'Same ID',
+  linked: 'Reference link',
+  partial: 'Partial',
+  pair: 'Exact pair',
+  'fifo-pair': 'FIFO pair',
+  combo: 'Combination',
+  nil: 'Nets to zero',
   near: 'Near miss',
-  fifo: 'Balance-forward (FIFO)',
+  fifo: 'Balance-forward',
 };
 
 export type Tier = 'high' | 'medium' | 'low';
+
+/** Confidence = base (why this kind of match is plausible) + evidence points, limited to 0..cap. */
+export interface ScoreBreakdown {
+  /** Plain-language reason for the starting score. */
+  basis: string;
+  base: number;
+  /** Corroborating evidence, each worth some points. */
+  parts: { label: string; points: number }[];
+  /** Set when the total was limited: the ceiling for this kind of match. */
+  cap: number | null;
+}
 
 export interface MatchGroup {
   /** Stable, human-readable id: M00001… */
@@ -60,6 +71,8 @@ export interface MatchGroup {
   residualFromId: number | null;
   confidence: number;
   tier: Tier;
+  /** How the confidence was built, for the on-hover explanation. */
+  score: ScoreBreakdown;
   reasons: string[];
   /** Part of the engine's suggested clean-up ("Approve all suggested"). */
   suggested: boolean;
@@ -78,7 +91,9 @@ export type ExceptionKind =
   | 'unapplied'
   | 'opposite-balance'
   | 'ambiguous'
-  | 'search-limit';
+  | 'search-limit'
+  | 'other-period'
+  | 'lost-text';
 
 export const EXCEPTION_LABEL: Record<ExceptionKind, string> = {
   duplicate: 'Duplicate posting',
@@ -90,6 +105,8 @@ export const EXCEPTION_LABEL: Record<ExceptionKind, string> = {
   'opposite-balance': 'Balance on the wrong side',
   ambiguous: 'Ambiguous match',
   'search-limit': 'Search limit reached',
+  'other-period': 'Counterpart outside this file',
+  'lost-text': 'Text lost in export',
 };
 
 export interface LedgerException {
@@ -104,6 +121,12 @@ export interface LedgerException {
 export interface CleanSettings {
   /** Sign invoices carry in this file: +1 receivables (debit), −1 payables (credit). */
   invoiceSign: 1 | -1;
+  /**
+   * A plain GL account (accruals, clearing, suspense, expense) rather than a
+   * customer/supplier ledger: sides are just debit (+) and credit (−); no
+   * balance-forward, no "unapplied cash" logic.
+   */
+  glAccount: boolean;
   /** Currency decimals (matches the validation precision). */
   precision: number;
   /** Near-miss tolerance in minor units (cents). */
@@ -126,6 +149,7 @@ export interface CleanSettings {
 
 export const DEFAULT_SETTINGS: CleanSettings = {
   invoiceSign: 1,
+  glAccount: false,
   precision: 2,
   toleranceAmount: 1000, // 10.00
   tolerancePercent: 0,

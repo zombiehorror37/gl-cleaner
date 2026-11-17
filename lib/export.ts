@@ -210,7 +210,7 @@ export async function buildWorkbook(input: ExportInput): Promise<ArrayBuffer> {
     ['Source file', input.fileName],
     ['Sheet', input.sheetName],
     ['Cleaned at', new Date().toISOString().replace('T', ' ').slice(0, 19)],
-    ['Ledger', settings.invoiceSign === 1 ? 'Receivables: invoices positive (+)' : 'Payables: invoices negative (−)'],
+    ['Ledger', settings.glAccount ? 'GL account: debits positive (+), credits negative (−)' : settings.invoiceSign === 1 ? 'Receivables: invoices positive (+)' : 'Payables: invoices negative (−)'],
     ['Near-miss tolerance', `${formatCents(settings.toleranceAmount, p)}${settings.tolerancePercent ? ` or ${settings.tolerancePercent}%` : ''}; withholding rates ${settings.withholdingRates.join('%, ')}%${settings.vatRate ? ` (also on pre-VAT at ${settings.vatRate}%)` : ''}`],
     ['', ''],
     ['Valid lines', t.originalRows],

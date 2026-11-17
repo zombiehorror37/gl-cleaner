@@ -1,16 +1,34 @@
 'use client';
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useStore } from '@/lib/store';
 import { applyDecisions, isBlocked, lockedLines } from '@/lib/engine/apply';
-import { EXCEPTION_LABEL, KIND_LABEL, type ExceptionKind, type GroupKind, type MatchGroup } from '@/lib/engine/types';
+import { EXCEPTION_LABEL, type ExceptionKind, type GroupKind, type MatchGroup, type Tier } from '@/lib/engine/types';
 import { formatCents } from '@/lib/parse/values';
-import { GroupCard, type GroupActions, type GroupStatus } from '@/components/review/GroupCard';
-import { Badge, Button, Card, cx, inputClass, Stat } from '@/components/ui';
+import {
+  FAMILY,
+  FAMILY_ORDER,
+  KIND_META,
+  KIND_ORDER,
+  STATUS_ORDER,
+  TIER_ORDER,
+  type Family,
+  type ReviewStatus,
+} from '@/lib/review-meta';
+import { MatchRow, type MatchActions, type MatchFilters } from '@/components/review/MatchRow';
+import { FamilyDot, KindTag, StatusTag, Tag, TierTag } from '@/components/review/Tags';
+import { Button, Card, cx, inputClass, Stat } from '@/components/ui';
 
-const PAGE = 40;
+const PAGE = 100;
 const CONTACT_PAGE = 200;
 
 type Item = { kind: 'single'; group: MatchGroup } | { kind: 'alts'; key: string; groups: MatchGroup[] };
+
+const toggle = <T,>(set: Set<T>, v: T): Set<T> => {
+  const n = new Set(set);
+  if (n.has(v)) n.delete(v);
+  else n.add(v);
+  return n;
+};
 
 export default function ReviewStep() {
   const result = useStore((s) => s.result)!;
@@ -27,59 +45,77 @@ export default function ReviewStep() {
   const [tab, setTab] = useState<'matches' | 'exceptions'>('matches');
   const [contact, setContact] = useState<string | null>(null);
   const [contactQuery, setContactQuery] = useState('');
-  const [contactFilter, setContactFilter] = useState<'all' | 'proposals' | 'open' | 'exceptions'>('proposals');
-  const [kind, setKind] = useState<'all' | GroupKind>('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | GroupStatus>('all');
+  const [contactFilter, setContactFilter] = useState<'all' | 'proposals' | 'open' | 'exceptions'>('all');
+  const [kinds, setKinds] = useState<Set<GroupKind>>(new Set());
+  const [tiers, setTiers] = useState<Set<Tier>>(new Set());
+  const [statuses, setStatuses] = useState<Set<ReviewStatus>>(new Set());
   const [search, setSearch] = useState('');
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [focusedId, setFocusedId] = useState<string | null>(null);
   const [shown, setShown] = useState(PAGE);
   const [contactsShown, setContactsShown] = useState(CONTACT_PAGE);
-  const [exKind, setExKind] = useState<'all' | ExceptionKind>('all');
+  const [exKinds, setExKinds] = useState<Set<ExceptionKind>>(new Set());
+  const [help, setHelp] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const p = result.settings.precision;
-  const fmt = (c: number) => formatCents(c, p);
+  const fmt = useCallback((c: number) => formatCents(c, p), [p]);
   const rows = validation.rows;
   const rowsById = useMemo(() => new Map(rows.map((r) => [r.id, r])), [rows]);
   const groups = result.groups;
+  const groupById = useMemo(() => new Map(groups.map((g) => [g.id, g])), [groups]);
   const contactsByKey = useMemo(() => new Map(result.contacts.map((c) => [c.key, c])), [result.contacts]);
+  const single = result.contacts.length === 1;
 
-  const actions = useMemo<GroupActions>(() => ({ approve, unapprove, dismiss, undismiss }), [approve, unapprove, dismiss, undismiss]);
+  const actions = useMemo<MatchActions>(() => ({ approve, unapprove, dismiss, undismiss }), [approve, unapprove, dismiss, undismiss]);
 
   const locked = useMemo(() => lockedLines(groups, approved), [groups, approved]);
   const status = useMemo(() => {
-    const m = new Map<string, GroupStatus>();
+    const m = new Map<string, ReviewStatus>();
     for (const g of groups) {
-      m.set(g.id, approved.has(g.id) ? 'approved' : dismissed.has(g.id) ? 'dismissed' : isBlocked(g, locked) ? 'blocked' : 'pending');
+      m.set(
+        g.id,
+        approved.has(g.id) ? 'approved' : dismissed.has(g.id) ? 'dismissed' : isBlocked(g, locked) ? 'blocked' : g.suggested && !g.individualOnly ? 'suggested' : 'review',
+      );
     }
     return m;
   }, [groups, approved, dismissed, locked]);
+  const blockedBy = (g: MatchGroup) => g.memberIds.map((id) => locked.get(id)).find((o) => o && o !== g.id);
 
   const outcome = useMemo(() => applyDecisions(rows, groups, approved, p), [rows, groups, approved, p]);
 
-  /** Greedy: approve suggested, non-dismissed groups that don't collide with what's approved. */
-  const approveSuggested = (candidates: MatchGroup[]) => {
-    const lockedNow = new Map(locked);
-    const ids: string[] = [];
-    for (const g of candidates) {
-      if (!g.suggested || g.individualOnly || approved.has(g.id) || dismissed.has(g.id) || isBlocked(g, lockedNow)) continue;
-      ids.push(g.id);
-      for (const id of g.memberIds) lockedNow.set(id, g.id);
-    }
-    approve(ids);
-  };
+  /** Greedy approval that never creates a conflict. Judgement calls and alternatives are left for one-by-one review. */
+  const bulkPlan = useCallback(
+    /** suggestedOnly: skip "To review" proposals (they need a look before a bulk approval). */
+    (candidates: MatchGroup[], suggestedOnly: boolean) => {
+      const lockedNow = new Map(locked);
+      const ids: string[] = [];
+      for (const g of candidates) {
+        const st = status.get(g.id);
+        if (st !== 'suggested' && st !== 'review') continue;
+        if (g.individualOnly || g.altKey || (suggestedOnly && st !== 'suggested')) continue;
+        if (isBlocked(g, lockedNow)) continue;
+        ids.push(g.id);
+        for (const id of g.memberIds) lockedNow.set(id, g.id);
+      }
+      return ids;
+    },
+    [locked, status],
+  );
 
-  const pendingSuggested = groups.filter((g) => g.suggested && !g.individualOnly && status.get(g.id) === 'pending');
+  const allSuggested = useMemo(() => bulkPlan(groups, true), [bulkPlan, groups]);
 
-  // ---- contact list -----------------------------------------------------------
+  // ---- contacts ------------------------------------------------------------------
   const perContact = useMemo(() => {
-    const m = new Map<string, { proposals: number; approved: number; exceptions: number; open: number; openNet: number }>();
-    for (const c of result.contacts) m.set(c.key, { proposals: 0, approved: 0, exceptions: 0, open: 0, openNet: 0 });
+    const m = new Map<string, { review: number; approved: number; notes: number; open: number; openNet: number }>();
+    for (const c of result.contacts) m.set(c.key, { review: 0, approved: 0, notes: 0, open: 0, openNet: 0 });
     for (const g of groups) {
       const e = m.get(g.contactKey)!;
       const st = status.get(g.id);
-      if (st === 'pending') e.proposals++;
+      if (st === 'suggested' || st === 'review') e.review++;
       if (st === 'approved') e.approved++;
     }
-    for (const x of result.exceptions) if (x.contactKey) m.get(x.contactKey)!.exceptions++;
+    for (const x of result.exceptions) if (x.contactKey) m.get(x.contactKey)!.notes++;
     for (const it of outcome.openItems) {
       const e = m.get(it.row.contactKey)!;
       e.open++;
@@ -92,76 +128,179 @@ export default function ReviewStep() {
     const q = contactQuery.trim().toLowerCase();
     return result.contacts.filter((c) => {
       const e = perContact.get(c.key)!;
-      if (contactFilter === 'proposals' && e.proposals === 0) return false;
+      if (contactFilter === 'proposals' && e.review === 0) return false;
       if (contactFilter === 'open' && e.open === 0) return false;
-      if (contactFilter === 'exceptions' && e.exceptions === 0) return false;
+      if (contactFilter === 'exceptions' && e.notes === 0) return false;
       return !q || c.code.toLowerCase().includes(q) || c.name.toLowerCase().includes(q);
     });
   }, [result.contacts, perContact, contactQuery, contactFilter]);
 
-  // ---- group list ----------------------------------------------------------------
+  // ---- filtering -------------------------------------------------------------------
   const needle = search.trim().toLowerCase();
+  const scoped = useMemo(
+    () =>
+      groups.filter((g) => {
+        if (contact && g.contactKey !== contact) return false;
+        if (!needle) return true;
+        if (g.id.toLowerCase().includes(needle)) return true;
+        return g.memberIds.some((id) => {
+          const r = rowsById.get(id)!;
+          return `${r.transactionId} ${r.reference ?? ''} ${r.description ?? ''} ${fmt(r.net)} ${r.contactCode} ${r.contactName}`.toLowerCase().includes(needle);
+        });
+      }),
+    [groups, contact, needle, rowsById, fmt],
+  );
+  const pass = useCallback(
+    (g: MatchGroup, skip?: 'kind' | 'tier' | 'status') =>
+      (skip === 'kind' || !kinds.size || kinds.has(g.kind)) &&
+      (skip === 'tier' || !tiers.size || tiers.has(g.tier)) &&
+      (skip === 'status' || !statuses.size || statuses.has(status.get(g.id)!)),
+    [kinds, tiers, statuses, status],
+  );
+  // Facet counts: each facet counts within the other active filters.
+  const counts = useMemo(() => {
+    const kind = new Map<GroupKind, number>();
+    const tier = new Map<Tier, number>();
+    const st = new Map<ReviewStatus, number>();
+    for (const g of scoped) {
+      if (pass(g, 'kind')) kind.set(g.kind, (kind.get(g.kind) ?? 0) + 1);
+      if (pass(g, 'tier')) tier.set(g.tier, (tier.get(g.tier) ?? 0) + 1);
+      if (pass(g, 'status')) st.set(status.get(g.id)!, (st.get(status.get(g.id)!) ?? 0) + 1);
+    }
+    return { kind, tier, st };
+  }, [scoped, pass, status]);
+  const filtered = useMemo(() => scoped.filter((g) => pass(g)), [scoped, pass]);
+  // "To review" items join a bulk approval only when the reviewer filtered to them on purpose.
+  const shownPlan = useMemo(() => bulkPlan(filtered, !statuses.has('review')), [bulkPlan, filtered, statuses]);
+
   const items = useMemo<Item[]>(() => {
-    const matches = (g: MatchGroup) => {
-      if (contact && g.contactKey !== contact) return false;
-      if (kind !== 'all' && g.kind !== kind) return false;
-      if (statusFilter !== 'all' && status.get(g.id) !== statusFilter) return false;
-      if (needle) {
-        const hay = g.memberIds
-          .map((id) => {
-            const r = rowsById.get(id)!;
-            return `${r.transactionId} ${r.reference ?? ''} ${r.description ?? ''} ${fmt(r.net)} ${r.contactCode} ${r.contactName}`;
-          })
-          .join(' ')
-          .toLowerCase();
-        if (!hay.includes(needle) && !g.id.toLowerCase().includes(needle)) return false;
-      }
-      return true;
-    };
-    const out: Item[] = [];
-    const altSeen = new Map<string, Item & { kind: 'alts' }>();
-    const ordered = [...groups].sort(
-      (a, b) =>
-        Number(b.suggested) - Number(a.suggested) ||
-        (contactsByKey.get(a.contactKey)!.code < contactsByKey.get(b.contactKey)!.code ? -1 : contactsByKey.get(a.contactKey)!.code > contactsByKey.get(b.contactKey)!.code ? 1 : 0) ||
-        a.id.localeCompare(b.id),
+    const code = (g: MatchGroup) => contactsByKey.get(g.contactKey)!.code;
+    const rank: Record<ReviewStatus, number> = { suggested: 0, review: 1, approved: 2, blocked: 3, dismissed: 4 };
+    const ordered = [...filtered].sort(
+      (a, b) => (code(a) < code(b) ? -1 : code(a) > code(b) ? 1 : 0) || rank[status.get(a.id)!] - rank[status.get(b.id)!] || a.id.localeCompare(b.id),
     );
+    const out: Item[] = [];
+    const alts = new Map<string, Item & { kind: 'alts' }>();
     for (const g of ordered) {
-      if (!matches(g)) continue;
-      if (g.altKey) {
-        const ex = altSeen.get(g.altKey);
-        if (ex) ex.groups.push(g);
-        else {
-          const it = { kind: 'alts' as const, key: g.altKey, groups: [g] };
-          altSeen.set(g.altKey, it);
-          out.push(it);
-        }
-      } else out.push({ kind: 'single', group: g });
+      if (!g.altKey) {
+        out.push({ kind: 'single', group: g });
+        continue;
+      }
+      const ex = alts.get(g.altKey);
+      if (ex) ex.groups.push(g);
+      else {
+        const it = { kind: 'alts' as const, key: g.altKey, groups: [g] };
+        alts.set(g.altKey, it);
+        out.push(it);
+      }
     }
     return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groups, contact, kind, statusFilter, needle, status, rowsById, contactsByKey]);
+  }, [filtered, status, contactsByKey]);
 
-  const kindsPresent = useMemo(() => [...new Set(groups.map((g) => g.kind))], [groups]);
-  const exceptionsShown = result.exceptions.filter((x) => (exKind === 'all' || x.kind === exKind) && (!contact || x.contactKey === contact));
+  const visible = items.slice(0, shown);
+  const visibleIds = useMemo(() => visible.flatMap((it) => (it.kind === 'single' ? [it.group.id] : it.groups.map((g) => g.id))), [visible]);
+
+  const filters = useMemo<MatchFilters>(
+    () => ({
+      kind: (k) => setKinds((s) => toggle(s, k)),
+      tier: (t) => setTiers((s) => toggle(s, t)),
+      status: (st) => setStatuses((s) => toggle(s, st)),
+      contact: (key) => setContact(key),
+    }),
+    [],
+  );
+  const toggleFamily = (f: Family) => {
+    const members = KIND_ORDER.filter((k) => KIND_META[k].family === f);
+    setKinds((s) => {
+      const all = members.every((k) => s.has(k));
+      const n = new Set(s);
+      for (const k of members) {
+        if (all) n.delete(k);
+        else n.add(k);
+      }
+      return n;
+    });
+  };
+  const anyFilter = kinds.size + tiers.size + statuses.size > 0 || needle !== '';
+  const clearFilters = () => {
+    setKinds(new Set());
+    setTiers(new Set());
+    setStatuses(new Set());
+    setSearch('');
+  };
+  const onToggle = useCallback((id: string) => setExpanded((s) => toggle(s, id)), []);
+
+  // ---- keyboard ------------------------------------------------------------------------
+  const kb = useRef({ visibleIds, focusedId, status, onToggle, actions, tab });
+  useEffect(() => {
+    kb.current = { visibleIds, focusedId, status, onToggle, actions, tab };
+  });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (e.metaKey || e.ctrlKey || e.altKey || t.closest('input, textarea, select')) return;
+      const { visibleIds: vis, focusedId: fid, status: st, onToggle: tog, actions: act, tab: tb } = kb.current;
+      if (e.key === '?') {
+        setHelp((h) => !h);
+        return;
+      }
+      if (e.key === 'Escape') {
+        setHelp(false);
+        return;
+      }
+      if (tb !== 'matches') return;
+      if (e.key === '/') {
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      const idx = fid ? vis.indexOf(fid) : -1;
+      const move = (d: number) => {
+        e.preventDefault();
+        const next = vis[Math.max(0, Math.min(vis.length - 1, idx + d))];
+        if (!next) return;
+        setFocusedId(next);
+        document.getElementById(`match-${next}`)?.scrollIntoView({ block: 'nearest' });
+      };
+      if (e.key === 'j' || e.key === 'ArrowDown') return move(1);
+      if (e.key === 'k' || e.key === 'ArrowUp') return move(-1);
+      if (!fid) return;
+      const s = st.get(fid);
+      if (e.key === 'Enter' || e.key === 'o' || e.key === ' ') {
+        e.preventDefault();
+        tog(fid);
+      } else if (e.key === 'a' && (s === 'suggested' || s === 'review')) act.approve([fid]);
+      else if (e.key === 'd' && (s === 'suggested' || s === 'review')) act.dismiss(fid);
+      else if (e.key === 'u' && s === 'approved') act.unapprove(fid);
+      else if (e.key === 'u' && s === 'dismissed') act.undismiss(fid);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // ---- exceptions -------------------------------------------------------------------------
+  const concerns = (x: (typeof result.exceptions)[number]) =>
+    !contact || x.contactKey === contact || (x.contactKey === null && (x.rowIds.length === 0 || x.rowIds.some((id) => rowsById.get(id)!.contactKey === contact)));
+  const exScoped = result.exceptions.filter(concerns);
+  const exCounts = new Map<ExceptionKind, number>();
+  for (const x of exScoped) exCounts.set(x.kind, (exCounts.get(x.kind) ?? 0) + 1);
+  const exShown = exScoped.filter((x) => !exKinds.size || exKinds.has(x.kind));
+
   const selected = contact ? contactsByKey.get(contact)! : null;
   const t = outcome.totals;
+  const kindsInScope = KIND_ORDER.filter((k) => (counts.kind.get(k) ?? 0) > 0 || kinds.has(k));
 
   return (
     <div className="space-y-4">
+      {/* Summary */}
       <div className="sticky top-[104px] z-10 flex flex-wrap items-center gap-2 rounded-xl border border-black/10 bg-white/90 p-2 backdrop-blur dark:border-white/10 dark:bg-zinc-950/90">
-        <Stat label="Approved matches" value={approved.size} hint={`${pendingSuggested.length} suggested pending`} />
+        <Stat label="Approved" value={approved.size} hint={`of ${groups.length} proposals`} />
         <Stat label="Lines cleared" value={`${t.clearedRows} / ${t.originalRows}`} hint={`${t.residualLines} residual line(s)`} />
         <Stat label="Open items" value={t.openRows} />
-        <Stat
-          label="Open balance"
-          value={fmt(t.openNet)}
-          tone={t.openNet === t.originalNet ? 'good' : 'bad'}
-          hint={t.openNet === t.originalNet ? '= original balance ✓' : 'does not reconcile'}
-        />
-        <div className="ml-auto flex flex-wrap gap-2">
-          <Button variant="good" disabled={!pendingSuggested.length} onClick={() => approveSuggested(groups)} title="Near misses and balance-forward are never included">
-            Approve all suggested ({pendingSuggested.length})
+        <Stat label="Open balance" value={fmt(t.openNet)} tone={t.openNet === t.originalNet ? 'good' : 'bad'} hint={t.openNet === t.originalNet ? '= original ✓' : 'does not reconcile'} />
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <Button variant="good" disabled={!allSuggested.length} onClick={() => approve(allSuggested)} title="Near misses, balance-forward and alternatives are never included">
+            Approve all suggested ({allSuggested.length})
           </Button>
           {approved.size > 0 && (
             <Button variant="ghost" onClick={clearDecisions}>
@@ -174,78 +313,78 @@ export default function ReviewStep() {
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[17rem_1fr]">
+      <div className={cx('grid gap-4', !single && 'lg:grid-cols-[16rem_1fr]')}>
         {/* Contacts */}
-        <Card className="flex max-h-[calc(100vh-14rem)] flex-col overflow-hidden lg:sticky lg:top-[200px]">
-          <div className="space-y-2 border-b border-black/10 p-2 dark:border-white/10">
-            <input className={inputClass} placeholder="Search contacts…" value={contactQuery} onChange={(e) => setContactQuery(e.target.value)} />
-            <select className={inputClass} value={contactFilter} onChange={(e) => setContactFilter(e.target.value as typeof contactFilter)}>
-              <option value="proposals">With pending proposals</option>
-              <option value="open">With open items</option>
-              <option value="exceptions">With exceptions</option>
-              <option value="all">All contacts</option>
-            </select>
-          </div>
-          <div className="flex-1 overflow-y-auto">
-            <button
-              onClick={() => {
-                setContact(null);
-                setShown(PAGE);
-              }}
-              className={cx('block w-full border-b border-black/5 px-3 py-2 text-left text-sm dark:border-white/5', !contact ? 'bg-indigo-600/10 font-semibold' : 'hover:bg-black/5 dark:hover:bg-white/5')}
-            >
-              All contacts <span className="opacity-60">({result.contacts.length})</span>
-            </button>
-            {contactList.slice(0, contactsShown).map((c) => {
-              const e = perContact.get(c.key)!;
-              return (
-                <button
-                  key={c.key}
-                  onClick={() => {
-                    setContact(c.key);
-                    setShown(PAGE);
-                  }}
-                  className={cx('block w-full border-b border-black/5 px-3 py-2 text-left text-sm dark:border-white/5', contact === c.key ? 'bg-indigo-600/10' : 'hover:bg-black/5 dark:hover:bg-white/5')}
-                >
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="truncate font-medium">{c.code}</span>
-                    <span className="font-mono text-xs tabular-nums opacity-70">{fmt(e.openNet)}</span>
-                  </div>
-                  <div className="truncate text-xs opacity-60">{c.name}</div>
-                  <div className="mt-0.5 flex gap-1">
-                    {e.proposals > 0 && <Badge tone="info">{e.proposals} to review</Badge>}
-                    {e.approved > 0 && <Badge tone="good">{e.approved} ✓</Badge>}
-                    {e.exceptions > 0 && <Badge tone="warn">{e.exceptions} !</Badge>}
-                    {e.open === 0 && <Badge tone="good">clear</Badge>}
-                  </div>
-                </button>
-              );
-            })}
-            {contactList.length > contactsShown && (
-              <button className="w-full p-2 text-sm text-indigo-600" onClick={() => setContactsShown((n) => n + CONTACT_PAGE)}>
-                Show more ({contactList.length - contactsShown})
+        {!single && (
+          <Card className="flex max-h-[calc(100vh-14rem)] flex-col overflow-hidden lg:sticky lg:top-[200px]">
+            <div className="space-y-2 border-b border-black/10 p-2 dark:border-white/10">
+              <input className={inputClass} placeholder="Search contacts…" value={contactQuery} onChange={(e) => setContactQuery(e.target.value)} />
+              <div className="flex flex-wrap gap-1">
+                {(
+                  [
+                    ['all', 'All'],
+                    ['proposals', 'To review'],
+                    ['open', 'Open items'],
+                    ['exceptions', 'Notes'],
+                  ] as const
+                ).map(([k, label]) => (
+                  <Tag key={k} onClick={() => setContactFilter(k)} active={contactFilter === k}>
+                    {label}
+                  </Tag>
+                ))}
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <button
+                onClick={() => {
+                  setContact(null);
+                  setShown(PAGE);
+                }}
+                className={cx('block w-full border-b border-black/5 px-3 py-2 text-left text-sm dark:border-white/5', !contact ? 'bg-indigo-600/10 font-semibold' : 'hover:bg-black/5 dark:hover:bg-white/5')}
+              >
+                All contacts <span className="font-normal opacity-60">({result.contacts.length})</span>
               </button>
-            )}
-            {contactList.length === 0 && <p className="p-3 text-sm opacity-60">No contacts match.</p>}
-          </div>
-        </Card>
+              {contactList.slice(0, contactsShown).map((c) => {
+                const e = perContact.get(c.key)!;
+                return (
+                  <button
+                    key={c.key}
+                    onClick={() => {
+                      setContact(c.key);
+                      setShown(PAGE);
+                    }}
+                    className={cx('block w-full border-b border-black/5 px-3 py-2 text-left text-sm dark:border-white/5', contact === c.key ? 'bg-indigo-600/10' : 'hover:bg-black/5 dark:hover:bg-white/5')}
+                  >
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="truncate font-medium">{c.code}</span>
+                      <span className="font-mono text-xs tabular-nums opacity-70">{fmt(e.openNet)}</span>
+                    </div>
+                    <div className="truncate text-xs opacity-60">{c.name}</div>
+                    <ContactCounters e={e} />
+                  </button>
+                );
+              })}
+              {contactList.length > contactsShown && (
+                <button className="w-full p-2 text-sm text-indigo-600" onClick={() => setContactsShown((n) => n + CONTACT_PAGE)}>
+                  Show more ({contactList.length - contactsShown})
+                </button>
+              )}
+              {contactList.length === 0 && <p className="p-3 text-sm opacity-60">No contacts match.</p>}
+            </div>
+          </Card>
+        )}
 
         {/* Detail */}
         <div className="min-w-0 space-y-3">
-          {selected && (
-            <div className="flex flex-wrap items-center gap-3">
-              <h2 className="text-lg font-semibold">
-                {selected.code} · {selected.name}
-              </h2>
-              <span className="text-sm opacity-70">
-                {selected.rowIds.length} lines · balance {fmt(selected.balance)} · open after approvals {fmt(perContact.get(selected.key)!.openNet)} in {perContact.get(selected.key)!.open} line(s)
-              </span>
-              {groups.some((g) => g.contactKey === selected.key && g.suggested && !g.individualOnly && status.get(g.id) === 'pending') && (
-                <Button size="sm" variant="good" onClick={() => approveSuggested(groups.filter((g) => g.contactKey === selected.key))}>
-                  Approve suggested for this contact
-                </Button>
-              )}
-            </div>
+          {(selected || single) && (
+            <ContactHeader
+              code={(selected ?? result.contacts[0]).code}
+              name={(selected ?? result.contacts[0]).name}
+              lines={(selected ?? result.contacts[0]).rowIds.length}
+              balance={fmt((selected ?? result.contacts[0]).balance)}
+              open={perContact.get((selected ?? result.contacts[0]).key)!}
+              fmt={fmt}
+            />
           )}
 
           <div className="flex flex-wrap items-center gap-2 border-b border-black/10 dark:border-white/10">
@@ -255,65 +394,127 @@ export default function ReviewStep() {
                 onClick={() => setTab(k)}
                 className={cx('-mb-px border-b-2 px-3 py-2 text-sm font-medium', tab === k ? 'border-indigo-600 text-indigo-700 dark:text-indigo-300' : 'border-transparent opacity-70 hover:opacity-100')}
               >
-                {k === 'matches' ? 'Matches' : `Exceptions (${result.exceptions.filter((x) => !contact || x.contactKey === contact).length})`}
+                {k === 'matches' ? `Matches (${scoped.length})` : `Notes & exceptions (${exScoped.length})`}
               </button>
             ))}
+            <button onClick={() => setHelp((h) => !h)} className="ml-auto rounded-md px-2 py-1 text-xs opacity-60 hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10" aria-expanded={help}>
+              Keyboard & legend (?)
+            </button>
           </div>
+
+          {help && <HelpPanel />}
 
           {tab === 'matches' && (
             <>
-              <div className="flex flex-wrap gap-2">
-                <select className={cx(inputClass, 'w-auto')} value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
-                  <option value="all">All match types</option>
-                  {kindsPresent.map((k) => (
-                    <option key={k} value={k}>
-                      {KIND_LABEL[k]}
-                    </option>
-                  ))}
-                </select>
-                <select className={cx(inputClass, 'w-auto')} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}>
-                  <option value="all">Any status</option>
-                  <option value="pending">To review</option>
-                  <option value="approved">Approved</option>
-                  <option value="dismissed">Dismissed</option>
-                  <option value="blocked">Blocked</option>
-                </select>
-                <input className={cx(inputClass, 'w-64')} placeholder="Search id, reference, amount…" value={search} onChange={(e) => setSearch(e.target.value)} />
-                <span className="self-center text-sm opacity-60">{items.length} result(s)</span>
-              </div>
+              {/* Facets */}
+              <Card className="space-y-2.5 p-3">
+                <FacetRow label="Type">
+                  {FAMILY_ORDER.map((f) => {
+                    const ks = kindsInScope.filter((k) => KIND_META[k].family === f);
+                    if (!ks.length) return null;
+                    const allOn = ks.every((k) => kinds.has(k));
+                    return (
+                      <span key={f} className="inline-flex flex-wrap items-center gap-1.5 rounded-lg bg-black/[0.03] py-1 pl-2 pr-1 dark:bg-white/[0.04]">
+                        <button
+                          type="button"
+                          onClick={() => toggleFamily(f)}
+                          aria-pressed={allOn}
+                          title={`${FAMILY[f].description} Click to filter the whole family.`}
+                          className={cx('inline-flex items-center gap-1.5 rounded px-1 text-xs font-semibold hover:underline', allOn && 'text-indigo-700 dark:text-indigo-300')}
+                        >
+                          <FamilyDot family={f} />
+                          {FAMILY[f].label}
+                        </button>
+                        {ks.map((k) => (
+                          <KindTag key={k} kind={k} count={counts.kind.get(k) ?? 0} active={kinds.has(k)} onClick={() => filters.kind(k)} />
+                        ))}
+                      </span>
+                    );
+                  })}
+                </FacetRow>
+                <div className="flex flex-wrap gap-x-6 gap-y-2.5">
+                  <FacetRow label="Confidence">
+                    {TIER_ORDER.map((tr) => (
+                      <TierTag key={tr} tier={tr} count={counts.tier.get(tr) ?? 0} active={tiers.has(tr)} onClick={() => filters.tier(tr)} />
+                    ))}
+                  </FacetRow>
+                  <FacetRow label="Status">
+                    {STATUS_ORDER.filter((s) => (counts.st.get(s) ?? 0) > 0 || statuses.has(s)).map((s) => (
+                      <StatusTag key={s} status={s} count={counts.st.get(s) ?? 0} active={statuses.has(s)} onClick={() => filters.status(s)} />
+                    ))}
+                  </FacetRow>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 border-t border-black/5 pt-2.5 dark:border-white/5">
+                  <input ref={searchRef} className={cx(inputClass, 'w-72')} placeholder="Search id, reference, description, amount… ( / )" value={search} onChange={(e) => setSearch(e.target.value)} />
+                  <span className="text-sm opacity-60">
+                    {filtered.length} of {scoped.length} shown
+                  </span>
+                  {anyFilter && (
+                    <button type="button" onClick={clearFilters} className="text-sm font-medium text-indigo-600 hover:underline dark:text-indigo-400">
+                      Clear filters
+                    </button>
+                  )}
+                  <div className="ml-auto flex gap-2">
+                    <Button size="sm" variant="ghost" onClick={() => setExpanded(expanded.size ? new Set() : new Set(visibleIds))}>
+                      {expanded.size ? 'Collapse all' : 'Expand all'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="good"
+                      disabled={!shownPlan.length}
+                      onClick={() => approve(shownPlan)}
+                      title="Approves the suggested matches in the current view that don't conflict. 'To review' items are included only when you filter Status to To review. Near misses, balance-forward and alternatives are always approved one by one."
+                    >
+                      Approve {shownPlan.length} shown
+                    </Button>
+                  </div>
+                </div>
+              </Card>
 
-              {items.length === 0 && <Card className="p-6 text-center text-sm opacity-70">Nothing to show with these filters.</Card>}
-              <div className="space-y-3">
-                {items.slice(0, shown).map((it) =>
-                  it.kind === 'single' ? (
-                    <GroupCard
-                      key={it.group.id}
-                      group={it.group}
+              {items.length === 0 && (
+                <Card className="p-6 text-center text-sm opacity-70">
+                  Nothing matches these filters.{' '}
+                  {anyFilter && (
+                    <button className="font-medium text-indigo-600 hover:underline" onClick={clearFilters}>
+                      Clear filters
+                    </button>
+                  )}
+                </Card>
+              )}
+
+              <div className="space-y-1.5">
+                {visible.map((it) => {
+                  const row = (g: MatchGroup) => (
+                    <MatchRow
+                      key={g.id}
+                      group={g}
                       rowsById={rowsById}
-                      status={status.get(it.group.id)!}
+                      status={status.get(g.id)!}
                       precision={p}
+                      expanded={expanded.has(g.id)}
+                      focused={focusedId === g.id}
+                      onToggle={onToggle}
+                      onFocus={setFocusedId}
                       actions={actions}
-                      contactLabel={contact ? undefined : `${contactsByKey.get(it.group.contactKey)!.code} · ${contactsByKey.get(it.group.contactKey)!.name}`}
+                      filters={filters}
+                      activeKind={kinds.has(g.kind)}
+                      activeTier={tiers.has(g.tier)}
+                      contactLabel={contact || single ? undefined : `${contactsByKey.get(g.contactKey)!.code} · ${contactsByKey.get(g.contactKey)!.name}`}
+                      blockedBy={blockedBy(g)}
                     />
-                  ) : (
-                    <div key={it.key} className="space-y-2 rounded-xl border border-dashed border-amber-500/50 p-2">
-                      <div className="px-1 text-sm font-medium text-amber-700 dark:text-amber-300">
-                        {it.groups.length} alternative ways to clear the same line. Approve at most one.
+                  );
+                  if (it.kind === 'single') return row(it.group);
+                  const anchor = groupById.get(it.groups[0].id)!;
+                  const target = rowsById.get(Number(anchor.altKey!.slice(4)));
+                  return (
+                    <div key={it.key} className="space-y-1.5 rounded-xl border border-dashed border-amber-500/60 bg-amber-500/[0.03] p-1.5">
+                      <div className="px-1.5 text-xs font-medium text-amber-800 dark:text-amber-300">
+                        {it.groups.length} alternative ways to clear {target ? `${target.transactionId} (${fmt(target.net)})` : 'the same line'}. Approve at most one.
                       </div>
-                      {it.groups.map((g) => (
-                        <GroupCard
-                          key={g.id}
-                          group={g}
-                          rowsById={rowsById}
-                          status={status.get(g.id)!}
-                          precision={p}
-                          actions={actions}
-                          contactLabel={contact ? undefined : `${contactsByKey.get(g.contactKey)!.code} · ${contactsByKey.get(g.contactKey)!.name}`}
-                        />
-                      ))}
+                      {it.groups.map(row)}
                     </div>
-                  ),
-                )}
+                  );
+                })}
               </div>
               {items.length > shown && (
                 <div className="text-center">
@@ -321,10 +522,10 @@ export default function ReviewStep() {
                 </div>
               )}
 
-              {selected && (
+              {(selected || single) && (
                 <Card className="p-3">
-                  <h3 className="mb-2 text-sm font-semibold">Open items for {selected.code} after your approvals</h3>
-                  <OpenTable items={outcome.openItems.filter((o) => o.row.contactKey === selected.key)} fmt={fmt} />
+                  <h3 className="mb-2 text-sm font-semibold">Open items after your approvals</h3>
+                  <OpenTable items={outcome.openItems.filter((o) => o.row.contactKey === (selected ?? result.contacts[0]).key)} fmt={fmt} />
                 </Card>
               )}
             </>
@@ -332,30 +533,42 @@ export default function ReviewStep() {
 
           {tab === 'exceptions' && (
             <>
-              <select className={cx(inputClass, 'w-auto')} value={exKind} onChange={(e) => setExKind(e.target.value as typeof exKind)}>
-                <option value="all">All exception types</option>
-                {[...new Set(result.exceptions.map((x) => x.kind))].map((k) => (
-                  <option key={k} value={k}>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[...exCounts].map(([k, n]) => (
+                  <Tag key={k} count={n} active={exKinds.has(k)} onClick={() => setExKinds((s) => toggle(s, k))}>
                     {EXCEPTION_LABEL[k]}
-                  </option>
+                  </Tag>
                 ))}
-              </select>
+                {exKinds.size > 0 && (
+                  <button className="ml-1 text-sm font-medium text-indigo-600 hover:underline dark:text-indigo-400" onClick={() => setExKinds(new Set())}>
+                    Clear
+                  </button>
+                )}
+              </div>
               <Card className="divide-y divide-black/5 dark:divide-white/5">
-                {exceptionsShown.length === 0 && <p className="p-4 text-sm opacity-60">No exceptions.</p>}
-                {exceptionsShown.slice(0, 500).map((x) => (
-                  <div key={x.id} className="flex gap-3 px-3 py-2 text-sm">
-                    <div className="w-44 shrink-0 space-y-1">
-                      <Badge tone={x.severity === 'warning' ? 'warn' : 'info'}>{EXCEPTION_LABEL[x.kind]}</Badge>
-                      {x.contactKey && !contact && (
-                        <button className="block text-xs text-indigo-600 hover:underline dark:text-indigo-400" onClick={() => setContact(x.contactKey)}>
-                          {contactsByKey.get(x.contactKey)!.code}
-                        </button>
-                      )}
-                    </div>
-                    <div className="min-w-0">
+                {exShown.length === 0 && <p className="p-4 text-sm opacity-60">Nothing to flag.</p>}
+                {exShown.slice(0, 500).map((x) => (
+                  <div key={x.id} className="flex gap-3 px-3 py-2.5 text-sm">
+                    <span
+                      className={cx('mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-[11px] font-bold', x.severity === 'warning' ? 'bg-amber-500/20 text-amber-800 dark:text-amber-300' : 'bg-sky-500/15 text-sky-800 dark:text-sky-300')}
+                      title={x.severity === 'warning' ? 'Warning' : 'Note'}
+                    >
+                      {x.severity === 'warning' ? '!' : 'i'}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex flex-wrap items-center gap-1.5">
+                        <Tag active={exKinds.has(x.kind)} onClick={() => setExKinds((s) => toggle(s, x.kind))}>
+                          {EXCEPTION_LABEL[x.kind]}
+                        </Tag>
+                        {x.contactKey && !contact && !single && (
+                          <button className="text-xs font-medium text-indigo-600 hover:underline dark:text-indigo-400" onClick={() => setContact(x.contactKey)}>
+                            {contactsByKey.get(x.contactKey)!.code} · {contactsByKey.get(x.contactKey)!.name}
+                          </button>
+                        )}
+                      </div>
                       <div>{x.message}</div>
                       {x.rowIds.length > 0 && (
-                        <div className="text-xs opacity-60">
+                        <div className="mt-0.5 text-xs opacity-60">
                           Rows {x.rowIds.slice(0, 20).map((id) => rowsById.get(id)!.sourceRow).join(', ')}
                           {x.rowIds.length > 20 && '…'}
                         </div>
@@ -372,8 +585,114 @@ export default function ReviewStep() {
   );
 }
 
+function FacetRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="w-20 shrink-0 text-xs font-semibold uppercase tracking-wide opacity-50">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function ContactCounters({ e }: { e: { review: number; approved: number; notes: number; open: number } }) {
+  const parts: [string, string][] = [];
+  if (e.review) parts.push(['bg-sky-500', `${e.review} to review`]);
+  if (e.approved) parts.push(['bg-emerald-500', `${e.approved} approved`]);
+  if (e.notes) parts.push(['bg-amber-500', `${e.notes} note${e.notes > 1 ? 's' : ''}`]);
+  if (!e.open) parts.push(['bg-emerald-500', 'fully cleared']);
+  if (!parts.length) return null;
+  return (
+    <div className="mt-1 flex flex-wrap gap-x-2.5 gap-y-0.5 text-[11px] opacity-75">
+      {parts.map(([dot, label]) => (
+        <span key={label} className="inline-flex items-center gap-1">
+          <span className={cx('h-1.5 w-1.5 rounded-full', dot)} />
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ContactHeader({
+  code,
+  name,
+  lines,
+  balance,
+  open,
+  fmt,
+}: {
+  code: string;
+  name: string;
+  lines: number;
+  balance: string;
+  open: { open: number; openNet: number };
+  fmt: (c: number) => string;
+}) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      <h2 className="text-lg font-semibold">
+        {code} · {name}
+      </h2>
+      <span className="text-sm opacity-70">
+        {lines} lines · balance {balance} · open after approvals {fmt(open.openNet)} in {open.open} line(s)
+      </span>
+    </div>
+  );
+}
+
+function HelpPanel() {
+  const keys: [string, string][] = [
+    ['j / ↓', 'next match'],
+    ['k / ↑', 'previous match'],
+    ['Enter', 'expand / collapse'],
+    ['a', 'approve'],
+    ['d', 'dismiss'],
+    ['u', 'undo'],
+    ['/', 'search'],
+    ['?', 'this panel'],
+  ];
+  return (
+    <Card className="grid gap-4 p-4 text-sm md:grid-cols-2">
+      <div>
+        <h3 className="mb-2 font-semibold">Keyboard</h3>
+        <dl className="grid grid-cols-[5rem_1fr] gap-y-1">
+          {keys.map(([k, v]) => (
+            <div key={k} className="contents">
+              <dt>
+                <kbd className="rounded border border-black/20 px-1.5 py-0.5 font-mono text-xs dark:border-white/20">{k}</kbd>
+              </dt>
+              <dd className="opacity-80">{v}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-2 text-xs opacity-60">Click a match first, or press j to start.</p>
+      </div>
+      <div>
+        <h3 className="mb-2 font-semibold">Match types</h3>
+        <ul className="space-y-2">
+          {FAMILY_ORDER.map((f) => (
+            <li key={f}>
+              <div className="flex items-center gap-1.5 font-medium">
+                <FamilyDot family={f} />
+                {FAMILY[f].label}
+              </div>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {KIND_ORDER.filter((k) => KIND_META[k].family === f).map((k) => (
+                  <KindTag key={k} kind={k} />
+                ))}
+              </div>
+              <p className="mt-0.5 text-xs opacity-60">{FAMILY[f].description}</p>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-2 text-xs opacity-60">Hover any tag for its meaning; click it to filter.</p>
+      </div>
+    </Card>
+  );
+}
+
 function OpenTable({ items, fmt }: { items: ReturnType<typeof applyDecisions>['openItems']; fmt: (c: number) => string }) {
-  if (!items.length) return <p className="text-sm text-emerald-600 dark:text-emerald-400">Nothing open: this contact is fully cleared.</p>;
+  if (!items.length) return <p className="text-sm text-emerald-600 dark:text-emerald-400">Nothing open: fully cleared.</p>;
   return (
     <table className="w-full text-left text-xs">
       <thead className="opacity-60">
@@ -396,7 +715,8 @@ function OpenTable({ items, fmt }: { items: ReturnType<typeof applyDecisions>['o
             <td className="py-1 pr-3 tabular-nums">{o.row.effectiveDate ?? o.row.effectiveDateText}</td>
             <td className="py-1 pr-3 tabular-nums">{o.row.dueDate ?? o.row.dueDateText}</td>
             <td className="max-w-80 truncate py-1 pr-3" title={o.row.description ?? ''}>
-              {o.kind === 'residual' && <Badge tone="warn">residual</Badge>} {o.row.description}
+              {o.kind === 'residual' && <span className="mr-1 rounded bg-amber-500/20 px-1 text-[10px] font-semibold uppercase text-amber-800 dark:text-amber-300">residual</span>}
+              {o.row.description}
             </td>
             <td className={cx('py-1 text-right font-mono tabular-nums', o.row.net < 0 && 'text-red-600 dark:text-red-400')}>{fmt(o.row.net)}</td>
           </tr>

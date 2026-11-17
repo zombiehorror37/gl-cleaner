@@ -157,3 +157,14 @@ describe('template header', () => {
     expect(loc.rowIndex).toBe(-1);
   });
 });
+
+describe('description keys', () => {
+  it('reduce an accrual and its reversal to the same keys', async () => {
+    const { descriptionKeys } = await import('../lib/parse/values');
+    expect(descriptionKeys('ACC-1/2025E07-ELEC')).toEqual(['E7', 'P2025-01']);
+    expect(descriptionKeys('R/ACR E7 1/25')).toEqual(['E7', 'P2025-01']);
+    expect(descriptionKeys('R/ACR E06 10/25')).toEqual(['E6', 'P2025-10']);
+    expect(descriptionKeys('Pmt INV-1001 on 12/03/2025')).toEqual(['1001']);
+    expect(descriptionKeys('ELECTRICITY')).toEqual([]);
+  });
+});
