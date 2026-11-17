@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "GL Cleaner",
   description:
-    "Find and remove offsetting general-ledger entries with combination search, confidence scoring, and full audit trail. All processing happens in your browser.",
+    "Clean customer and supplier ledgers in a fixed GL template: match invoices to payments the way an accountant would, with a full audit trail. Runs entirely in your browser.",
 };
 
 export default function RootLayout({

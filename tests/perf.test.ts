@@ -1,45 +1,71 @@
-// Performance envelope check. Run explicitly: PERF=1 npx vitest run tests/perf.test.ts
 import { describe, expect, it } from 'vitest';
-import { runAccount } from '../lib/engine/run';
-import { DEFAULT_SEARCH, type Entry } from '../lib/engine/types';
+import { cleanLedger } from '../lib/engine/clean';
+import { applyDecisions } from '../lib/engine/apply';
+import { DEFAULT_SETTINGS } from '../lib/engine/types';
+import type { LedgerRow } from '../lib/parse/validate';
 
-const mk = (id: number, amount: number): Entry => ({
-  id,
-  account: 'PERF',
-  date: Date.UTC(2026, 0, 1 + (id % 60)),
-  docNo: String(700000 + id),
-  docType: 'JE',
-  reference: null,
-  description: `row ${id}`,
-  amount,
-  raw: [],
-});
+/** Deterministic PRNG so the generated ledger is the same every run. */
+function rng(seed: number) {
+  return () => {
+    seed = (seed * 1664525 + 1013904223) % 4294967296;
+    return seed / 4294967296;
+  };
+}
 
-describe.skipIf(!process.env.PERF)('5k-row performance', () => {
-  it('completes a 5,000-row account within a sane wall time', () => {
-    // Deterministic pseudo-random amounts, ~70% positive.
-    let seed = 42;
-    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
-    const entries: Entry[] = [];
-    for (let i = 0; i < 5000; i++) {
-      const mag = Math.round(rnd() * 5_000_00) + 100;
-      entries.push(mk(i, rnd() < 0.7 ? mag : -mag));
-    }
-    const t0 = Date.now();
-    const res = runAccount(entries, {
-      ...DEFAULT_SEARCH,
-      account: 'PERF',
-      nature: 'debit',
-      maxComboSize: 4,
-      perTargetBudgetMs: 500,
+function synthetic(contacts: number, invoicesPer: number, seed = 7): LedgerRow[] {
+  const rand = rng(seed);
+  const rows: LedgerRow[] = [];
+  const push = (c: number, txn: string, net: number, day: number, ref: string | null) =>
+    rows.push({
+      id: rows.length,
+      sourceRow: rows.length + 2,
+      contactCode: `C${c}`,
+      contactName: `Contact ${c}`,
+      transactionId: txn,
+      documentType: net > 0 ? 'Invoice' : 'Receipt',
+      dueDate: null,
+      effectiveDate: `2025-${String(1 + (day % 12)).padStart(2, '0')}-${String(1 + (day % 28)).padStart(2, '0')}`,
+      reference: ref,
+      description: null,
+      net,
+      contactKey: `C${c}`,
+      txnKey: txn.replace(/\W/g, ''),
+      docClass: net > 0 ? 'invoice' : 'payment',
     });
-    const elapsed = Date.now() - t0;
-    console.log(
-      `5k rows: ${elapsed}ms, ${res.groups.length} groups, ${res.stats.statesExplored.toLocaleString()} states, ` +
-        `outcomes: ${JSON.stringify(res.outcomes.reduce((m: Record<string, number>, o) => ((m[o.status] = (m[o.status] ?? 0) + 1), m), {}))}`,
-    );
-    expect(res.groups.length).toBeGreaterThan(0);
-    // Single-threaded engine; the browser shards this across cores.
-    expect(elapsed).toBeLessThan(15 * 60_000);
-  }, 900_000);
+  for (let c = 0; c < contacts; c++) {
+    for (let i = 0; i < invoicesPer; i++) {
+      const amt = Math.round(rand() * 5_000_000) + 100;
+      const inv = `INV-${c}-${i}`;
+      push(c, inv, amt, i, null);
+      const roll = rand();
+      if (roll < 0.4) push(c, `R-${c}-${i}`, -amt, i + 20, inv);
+      else if (roll < 0.6) push(c, `R-${c}-${i}`, -amt, i + 20, null);
+      else if (roll < 0.7) push(c, `R-${c}-${i}`, -Math.round(amt / 2), i + 20, inv);
+    }
+  }
+  return rows;
+}
+
+describe('performance', () => {
+  it('20k lines across 500 contacts', () => {
+    const rows = synthetic(500, 26);
+    const t0 = Date.now();
+    const res = cleanLedger(rows, DEFAULT_SETTINGS);
+    const ms = Date.now() - t0;
+    const out = applyDecisions(rows, res.groups, new Set(res.groups.filter((g) => g.suggested).map((g) => g.id)));
+    expect(out.errors).toEqual([]);
+    expect(out.totals.openNet).toBe(out.totals.originalNet);
+    expect(ms).toBeLessThan(30_000);
+    console.log(`20k lines: ${rows.length} rows, ${res.groups.length} groups, ${ms} ms`);
+  }, 60_000);
+
+  it('one very large contact stays within the time budget', () => {
+    const rows = synthetic(1, 2500, 11);
+    const t0 = Date.now();
+    const res = cleanLedger(rows, { ...DEFAULT_SETTINGS, totalComboBudgetMs: 10_000 });
+    const ms = Date.now() - t0;
+    expect(applyDecisions(rows, res.groups, new Set(res.groups.filter((g) => g.suggested).map((g) => g.id))).errors).toEqual([]);
+    expect(ms).toBeLessThan(25_000);
+    console.log(`big contact: ${rows.length} rows, ${res.groups.length} groups, ${ms} ms`);
+  }, 60_000);
 });

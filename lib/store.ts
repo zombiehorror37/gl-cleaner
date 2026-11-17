@@ -1,110 +1,107 @@
 'use client';
 import { create } from 'zustand';
-import type { ParsedWorkbook } from './parse';
-import type { ColumnMapping } from './template';
-import { EMPTY_MAPPING } from './template';
-import type {
-  AccountConfig,
-  AmountCluster,
-  EngineProgress,
-  EngineResult,
-  Entry,
-  MatchGroup,
-  TargetOutcome,
-} from './engine/types';
-import { DEFAULT_SEARCH, groupEntryIds } from './engine/types';
+import type { RawWorkbook } from './parse/read';
+import { validateSheet, DEFAULT_VALIDATION, type ValidationOptions, type ValidationResult } from './parse/validate';
+import { DEFAULT_SETTINGS, type CleanProgress, type CleanResult, type CleanSettings } from './engine/types';
 
-export type WizardStep = 'upload' | 'map' | 'configure' | 'review' | 'export';
-export const STEP_ORDER: WizardStep[] = ['upload', 'map', 'configure', 'review', 'export'];
-
-export interface AccountRun {
-  account: string;
-  result: EngineResult;
-}
+export type Step = 'upload' | 'check' | 'review' | 'export';
+export const STEPS: Step[] = ['upload', 'check', 'review', 'export'];
+export const STEP_LABEL: Record<Step, string> = {
+  upload: 'Upload',
+  check: 'Check & Settings',
+  review: 'Review Matches',
+  export: 'Export',
+};
 
 interface State {
-  step: WizardStep;
-  workbook: ParsedWorkbook | null;
+  step: Step;
+  workbook: RawWorkbook | null;
   sheetIndex: number;
-  mapping: ColumnMapping;
-  entries: Entry[];
-  skippedRows: number[];
-  accounts: string[];
-  configs: Record<string, AccountConfig>;
+  validationOptions: ValidationOptions;
+  validation: ValidationResult | null;
+  settings: CleanSettings;
+  /** True once the user picked the ledger side explicitly (stops auto-suggestion overriding it). */
+  ledgerChosen: boolean;
   running: boolean;
-  progress: EngineProgress | null;
-  runs: AccountRun[];
+  progress: CleanProgress | null;
+  result: CleanResult | null;
   approved: Set<string>;
-  rejected: Set<string>;
+  dismissed: Set<string>;
 
-  setStep: (s: WizardStep) => void;
-  setWorkbook: (wb: ParsedWorkbook | null) => void;
-  setSheetIndex: (i: number) => void;
-  setMapping: (m: ColumnMapping) => void;
-  setEntries: (entries: Entry[], skipped: number[], accounts: string[]) => void;
-  setConfig: (account: string, patch: Partial<AccountConfig>) => void;
+  setStep: (s: Step) => void;
+  loadWorkbook: (wb: RawWorkbook) => void;
+  setSheet: (i: number) => void;
+  setValidationOptions: (patch: Partial<ValidationOptions>) => void;
+  setSettings: (patch: Partial<CleanSettings>, ledgerChosen?: boolean) => void;
   setRunning: (r: boolean) => void;
-  setProgress: (p: EngineProgress | null) => void;
-  setRuns: (runs: AccountRun[]) => void;
-  approve: (id: string) => void;
+  setProgress: (p: CleanProgress | null) => void;
+  setResult: (r: CleanResult | null) => void;
+  approve: (ids: string[]) => void;
   unapprove: (id: string) => void;
-  reject: (id: string) => void;
-  unreject: (id: string) => void;
-  approveMany: (ids: string[]) => void;
-  resetDecisions: () => void;
+  dismiss: (id: string) => void;
+  undismiss: (id: string) => void;
+  clearDecisions: () => void;
   reset: () => void;
 }
 
-export const useStore = create<State>((set) => ({
+const revalidate = (wb: RawWorkbook | null, sheetIndex: number, opts: ValidationOptions) =>
+  wb && wb.sheets[sheetIndex] ? validateSheet(wb.sheets[sheetIndex].matrix, opts) : null;
+
+const firstValidSheet = (wb: RawWorkbook, opts: ValidationOptions) => {
+  for (let i = 0; i < wb.sheets.length; i++) {
+    const v = validateSheet(wb.sheets[i].matrix, opts);
+    if (v.headerOk) return { i, v };
+  }
+  return { i: 0, v: validateSheet(wb.sheets[0]?.matrix ?? [], opts) };
+};
+
+const cleared = { result: null, approved: new Set<string>(), dismissed: new Set<string>(), progress: null };
+
+export const useStore = create<State>((set, get) => ({
   step: 'upload',
   workbook: null,
   sheetIndex: 0,
-  mapping: { ...EMPTY_MAPPING },
-  entries: [],
-  skippedRows: [],
-  accounts: [],
-  configs: {},
+  validationOptions: { ...DEFAULT_VALIDATION },
+  validation: null,
+  settings: { ...DEFAULT_SETTINGS },
+  ledgerChosen: false,
   running: false,
   progress: null,
-  runs: [],
+  result: null,
   approved: new Set(),
-  rejected: new Set(),
+  dismissed: new Set(),
 
   setStep: (step) => set({ step }),
-  setWorkbook: (workbook) => set({ workbook, sheetIndex: 0 }),
-  setSheetIndex: (sheetIndex) => set({ sheetIndex }),
-  setMapping: (mapping) => set({ mapping }),
-  setEntries: (entries, skippedRows, accounts) =>
+  loadWorkbook: (workbook) => {
+    const { i, v } = firstValidSheet(workbook, get().validationOptions);
+    set({ workbook, sheetIndex: i, validation: v, step: 'check', ledgerChosen: false, ...cleared });
+  },
+  setSheet: (sheetIndex) =>
+    set((st) => ({ sheetIndex, validation: revalidate(st.workbook, sheetIndex, st.validationOptions), ...cleared })),
+  setValidationOptions: (patch) =>
     set((st) => {
-      const configs: Record<string, AccountConfig> = {};
-      for (const a of accounts) {
-        const existing = st.configs[a];
-        if (existing) {
-          configs[a] = existing;
-        } else {
-          // Infer nature from which side dominates; near-balanced → suspense.
-          const acctEntries = entries.filter((e) => e.account === a);
-          const posN = acctEntries.filter((e) => e.amount > 0).length;
-          const negN = acctEntries.length - posN;
-          const ratio = acctEntries.length ? Math.min(posN, negN) / acctEntries.length : 0;
-          const nature = ratio > 0.25 ? 'suspense' : posN >= negN ? 'debit' : 'credit';
-          configs[a] = { ...DEFAULT_SEARCH, account: a, nature };
-        }
-      }
-      return { entries, skippedRows, accounts, configs, runs: [], approved: new Set(), rejected: new Set() };
+      const validationOptions = { ...st.validationOptions, ...patch };
+      return {
+        validationOptions,
+        validation: revalidate(st.workbook, st.sheetIndex, validationOptions),
+        settings: { ...st.settings, precision: validationOptions.precision },
+        ...cleared,
+      };
     }),
-  setConfig: (account, patch) =>
-    set((st) => ({ configs: { ...st.configs, [account]: { ...st.configs[account], ...patch } } })),
+  setSettings: (patch, ledgerChosen) =>
+    set((st) => ({ settings: { ...st.settings, ...patch }, ledgerChosen: ledgerChosen ?? st.ledgerChosen, ...cleared })),
   setRunning: (running) => set({ running }),
   setProgress: (progress) => set({ progress }),
-  setRuns: (runs) => set({ runs, approved: new Set(), rejected: new Set() }),
-  approve: (id) =>
+  setResult: (result) => set({ result, approved: new Set(), dismissed: new Set() }),
+  approve: (ids) =>
     set((st) => {
       const approved = new Set(st.approved);
-      approved.add(id);
-      const rejected = new Set(st.rejected);
-      rejected.delete(id);
-      return { approved, rejected };
+      const dismissed = new Set(st.dismissed);
+      for (const id of ids) {
+        approved.add(id);
+        dismissed.delete(id);
+      }
+      return { approved, dismissed };
     }),
   unapprove: (id) =>
     set((st) => {
@@ -112,68 +109,29 @@ export const useStore = create<State>((set) => ({
       approved.delete(id);
       return { approved };
     }),
-  reject: (id) =>
+  dismiss: (id) =>
     set((st) => {
-      const rejected = new Set(st.rejected);
-      rejected.add(id);
+      const dismissed = new Set(st.dismissed);
+      dismissed.add(id);
       const approved = new Set(st.approved);
       approved.delete(id);
-      return { approved, rejected };
+      return { approved, dismissed };
     }),
-  unreject: (id) =>
+  undismiss: (id) =>
     set((st) => {
-      const rejected = new Set(st.rejected);
-      rejected.delete(id);
-      return { rejected };
+      const dismissed = new Set(st.dismissed);
+      dismissed.delete(id);
+      return { dismissed };
     }),
-  approveMany: (ids) =>
-    set((st) => {
-      const approved = new Set(st.approved);
-      const rejected = new Set(st.rejected);
-      for (const id of ids) {
-        approved.add(id);
-        rejected.delete(id);
-      }
-      return { approved, rejected };
-    }),
-  resetDecisions: () => set({ approved: new Set(), rejected: new Set() }),
+  clearDecisions: () => set({ approved: new Set(), dismissed: new Set() }),
   reset: () =>
     set({
       step: 'upload',
       workbook: null,
       sheetIndex: 0,
-      mapping: { ...EMPTY_MAPPING },
-      entries: [],
-      skippedRows: [],
-      accounts: [],
-      configs: {},
+      validation: null,
+      ledgerChosen: false,
       running: false,
-      progress: null,
-      runs: [],
-      approved: new Set(),
-      rejected: new Set(),
+      ...cleared,
     }),
 }));
-
-/** All groups across accounts. */
-export const allGroups = (runs: AccountRun[]): MatchGroup[] => runs.flatMap((r) => r.result.groups);
-export const allClusters = (runs: AccountRun[]): AmountCluster[] => runs.flatMap((r) => r.result.clusters);
-export const allOutcomes = (runs: AccountRun[]): TargetOutcome[] => runs.flatMap((r) => r.result.outcomes);
-
-/** entryId -> approved group id (locks). */
-export function lockedEntries(groups: MatchGroup[], approved: Set<string>): Map<number, string> {
-  const locked = new Map<number, string>();
-  for (const g of groups) {
-    if (!approved.has(g.id)) continue;
-    for (const e of groupEntryIds(g)) locked.set(e, g.id);
-  }
-  return locked;
-}
-
-/** A group is blocked when an entry it needs is locked by a different approved group. */
-export function isBlocked(g: MatchGroup, locked: Map<number, string>): boolean {
-  return groupEntryIds(g).some((e) => {
-    const owner = locked.get(e);
-    return owner !== undefined && owner !== g.id;
-  });
-}
